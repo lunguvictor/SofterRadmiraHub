@@ -325,7 +325,7 @@ local DEFAULTS = {
     Notifs = true,
     Hud = true, HudPos = 0,
     MenuKey = 0,
-    TruckMax = true, TruckMinPrice = "10000", TruckType = 0, TruckDebug = false,
+    TruckMax = true, TruckMinPrice = "10001", TruckType = 0, TruckDebug = false,
 }
 
 local config = inicfg.load({ Settings = DEFAULTS }, INI_NAME)
