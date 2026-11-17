@@ -1,7 +1,7 @@
 script_name("SofterRadmira Hub")
 script_description("SofterRadmira Hub: fishing, trucking, train, hunting, and Svalka")
 script_author("SofterRadmira")
-script_version("5.2.0")
+script_version("5.2.1")
 
 local imgui    = require("mimgui")
 local encoding = require("encoding")
@@ -307,7 +307,7 @@ local ImVec2 = imgui.ImVec2
 local ImVec4 = imgui.ImVec4
 local Cond   = imgui.Cond
 
-local VERSION  = "5.2.0"
+local VERSION  = "5.2.1"
 local INI_NAME = "SofterRadmiraFish_red.ini"
 
 --================= ��������� =================--
@@ -2253,6 +2253,7 @@ local function renderInterface(w)
     local presets = {
         { 0.92, 0.16, 0.22 }, { 1.00, 0.30, 0.15 }, { 0.80, 0.08, 0.35 },
         { 1.00, 0.45, 0.50 }, { 0.90, 0.90, 0.92 },
+        { 0.58, 0.30, 0.95 },
     }
 
     Ui.group(ru("Внешний вид"), {
