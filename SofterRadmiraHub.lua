@@ -1,7 +1,7 @@
 script_name("SofterRadmira Hub")
 script_description("SofterRadmira Hub: fishing, trucking, train, hunting, and Svalka")
 script_author("SofterRadmira")
-script_version("5.2.1")
+script_version("5.2.2")
 
 local imgui    = require("mimgui")
 local encoding = require("encoding")
