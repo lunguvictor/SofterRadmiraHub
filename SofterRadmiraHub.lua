@@ -1479,6 +1479,9 @@ function onReceivePacket(id, bs)
     if id ~= 215 then return end
     ohotaOnPacket(bs)
     trainbot.onPacket(id, bs)
+    if caseCatcher then
+        caseCatcher.onPacket(id, bs)
+    end
     if truck.enabled then
         if truckPacket(bs) == false then return false end
     end
@@ -1747,7 +1750,7 @@ local SB_X, SB_W = 10, 188
 local CONTENT_X = 214
 local TOP_H = 64
 
-local TAB_HOME, TAB_FISH, TAB_TRUCK, TAB_TRAIN, TAB_OHOTA, TAB_SVALKA, TAB_LOOK, TAB_SET = 1, 2, 3, 4, 5, 6, 7, 8
+local TAB_HOME, TAB_FISH, TAB_TRUCK, TAB_TRAIN, TAB_OHOTA, TAB_SVALKA, TAB_CASE, TAB_LOOK, TAB_SET = 1, 2, 3, 4, 5, 6, 7, 8, 9
 
 local Tabs = {
     { ru("Главная"), ru("Обзор модулей и управление"), 1 },
@@ -1762,6 +1765,7 @@ local trainTab = table.remove(Tabs, 6)
 table.insert(Tabs, 4, trainTab)
 table.insert(Tabs, 5, { "\206\245\238\242\224", "\204\229\242\234\232, \239\240\232\246\229\235 \232 \243\242\232\235\232\242\251", 4 })
 table.insert(Tabs, 6, { ru("Свалка"), ru("Метки предметов на свалке"), 3 })
+table.insert(Tabs, 7, { ru("Кейсы"), ru("Автопокупка кейсов по таймеру"), 5 })
 
 local State = {
     window = imgui.new.bool(false),
@@ -1769,6 +1773,115 @@ local State = {
     dragPos = nil,
     lastMouse = nil,
 }
+
+--================= Кейсы =================--
+caseCatcher = {
+    enabled = imgui.new.bool(false),
+    timerDuration = nil,
+    timerStartedAt = nil,
+    lastBuy = 0,
+    quantities = {},
+}
+
+caseCatcher.categories = {
+    { id = 30, name = ru("Броня") }, { id = 31, name = ru("Средний кейс") },
+    { id = 32, name = ru("Быстрый кейс") }, { id = 33, name = ru("Оружие") },
+    { id = 34, name = ru("Приватный") }, { id = 35, name = ru("Личный кейс") },
+    { id = 36, name = ru("События") }, { id = 37, name = ru("Редкий кейс") },
+    { id = 38, name = ru("Новый кейс 2") }, { id = 39, name = ru("Административный кейс") },
+    { id = 40, name = ru("Кейс золота") }, { id = 41, name = ru("Аттракцион") },
+    { id = 42, name = ru("Лотерея") }, { id = 43, name = ru("Премиум кейс") },
+    { id = 44, name = ru("Уникальный кейс") }, { id = 45, name = ru("Эксклюзив кейс") },
+    { id = 46, name = ru("Сезонный кейс") }, { id = 47, name = ru("Кейс сервера") },
+    { id = 48, name = ru("Акционный кейс") },
+}
+
+for _, category in ipairs(caseCatcher.categories) do
+    caseCatcher.quantities[category.id] = imgui.new.int(0)
+end
+
+local function sendCasePacket()
+    local lines = {}
+    for _, category in ipairs(caseCatcher.categories) do
+        local quantity = caseCatcher.quantities[category.id][0]
+        if quantity > 0 then lines[#lines + 1] = string.format("%d|0|0|%d", category.id, quantity) end
+    end
+    if #lines == 0 then return false end
+
+    local bytes = {}
+    local function wB(value) bytes[#bytes + 1] = value end
+    local function wI32(value)
+        for _ = 1, 4 do
+            wB(value % 256)
+            value = math.floor(value / 256)
+        end
+    end
+    local function wS(value)
+        wI32(#value)
+        for i = 1, #value do wB(value:byte(i)) end
+    end
+
+    wB(0xD7); wB(0x02); wB(0x00); wI32(0)
+    wS("DS_OnPlayerBuyCart")
+    wI32(4); wB(100); wI32(#lines); wB(0x73)
+    local encoded = {}
+    for _, line in ipairs(lines) do encoded[#encoded + 1] = '"' .. line .. '"' end
+    wS("[" .. table.concat(encoded, ",") .. "]")
+
+    local bs = raknetNewBitStream()
+    if not bs then return false end
+    local ok, result = pcall(function()
+        for i = 1, #bytes do raknetBitStreamWriteInt8(bs, bytes[i]) end
+        return raknetSendBitStream(bs)
+    end)
+    pcall(raknetDeleteBitStream, bs)
+    return ok and result ~= false
+end
+
+function caseCatcher.update()
+    if not caseCatcher.enabled[0] or not caseCatcher.timerDuration or not caseCatcher.timerStartedAt then return end
+    local currentTime = getGameTimer() / 1000
+    local remaining = caseCatcher.timerDuration - (currentTime - caseCatcher.timerStartedAt)
+    if remaining <= 0 and (currentTime - caseCatcher.lastBuy) >= 2 then
+        local hasItems = false
+        for _, quantity in pairs(caseCatcher.quantities) do
+            if quantity[0] > 0 then hasItems = true break end
+        end
+        if hasItems and sendCasePacket() then
+            caseCatcher.lastBuy = currentTime
+            caseCatcher.timerStartedAt = currentTime - caseCatcher.timerDuration
+            Notifications.push("success", ru("Кейсы"), ru("Заказ кейсов отправлен"))
+        end
+    end
+end
+
+function caseCatcher.onPacket(id, bs)
+    if id ~= 215 then return end
+    raknetBitStreamResetReadPointer(bs)
+    raknetBitStreamReadInt8(bs)
+    local rpcId = raknetBitStreamReadInt16(bs)
+    raknetBitStreamReadInt32(bs)
+    local count = raknetBitStreamReadInt8(bs)
+    if rpcId == 2 and count and count > 0 and count < 128 then
+        local parts = {}
+        for _ = 1, count do
+            local len = raknetBitStreamReadInt32(bs)
+            if len and len > 0 and len < 10000 then
+                local success, value = pcall(raknetBitStreamReadString, bs, len)
+                if success and value and value ~= "" then parts[#parts + 1] = value end
+            end
+        end
+        local text = table.concat(parts)
+        if text:find("onServerResponse(22", 1, true) then
+            local seconds = text:match("onServerResponse%(22,%s*'%[%[%d+%],%s*%[%d+%],%s*(%d+),")
+            if seconds then
+                caseCatcher.timerDuration = tonumber(seconds)
+                caseCatcher.timerStartedAt = getGameTimer() / 1000
+            end
+        end
+    end
+    raknetBitStreamResetReadPointer(bs)
+end
 
 svalka.showPage = function()
     State.tab = TAB_SVALKA
@@ -1786,7 +1899,7 @@ local posItems = imgui.new["const char*"][#posNames](posNames)
 local function menuKeyCode() return keyCodes[S.menuKey[0] + 1] or 0x2D end
 
 local function runningModule()
-    if bot.on then return "fish" elseif truck.enabled then return "truck" elseif trainbot.enabled then return "train" elseif Ohota.enabled then return "hunt" elseif svalka.active[0] then return "svalka" end
+    if bot.on then return "fish" elseif truck.enabled then return "truck" elseif trainbot.enabled then return "train" elseif Ohota.enabled then return "hunt" elseif svalka.active[0] then return "svalka" elseif caseCatcher.enabled[0] then return "case" end
     return nil
 end
 
@@ -1795,6 +1908,7 @@ local function currentModule()
     if State.tab == TAB_TRAIN then return "train" end
     if State.tab == TAB_OHOTA then return "hunt" end
     if State.tab == TAB_SVALKA then return "svalka" end
+    if State.tab == TAB_CASE then return "case" end
     return "fish"
 end
 
@@ -1804,6 +1918,7 @@ local MODULE_NAMES = {
     train = "\207\238\229\231\228",
     hunt = "\206\245\238\242\224",
     svalka = ru("Свалка"),
+    case = ru("Кейсы"),
 }
 
 local function resetSettings()
@@ -1858,6 +1973,11 @@ local function renderHome(w)
         or (svalka.loaded and (ru("Предметов выбрано: ") .. enabledSvalkaItems) or ru("Список предметов не загружен"))
     Ui.moduleCard("m_svalka", ru("Свалка"), ru("Метки предметов на свалке"), 3, svalka.active[0], svalkaStatus, w,
         svalka.toggle, svalka.showPage)
+
+    local caseStatus = caseCatcher.enabled[0] and ru("Автопокупка включена") or ru("Ожидает запуска")
+    Ui.moduleCard("m_case", ru("Кейсы"), ru("Автопокупка кейсов по таймеру"), 5, caseCatcher.enabled[0], caseStatus, w,
+        function() caseCatcher.enabled[0] = not caseCatcher.enabled[0] end,
+        function() State.tab = TAB_CASE end)
 
     -- ����� ��� ������� ������
     local pp = imgui.GetCursorScreenPos()
@@ -2064,6 +2184,48 @@ local function renderTrain(w)
         { kind = "button", id = "train_toggle", title = ru("Управление поездом"),
           desc = ru("Запустить или остановить автопилот"), label = trainbot.enabled and ru("Остановить") or ru("Запустить"),
           variant = trainbot.enabled and "danger" or "accent", onClick = toggleTrain },
+    })
+end
+
+local function renderCase(w)
+    local remainingText = "--:--:--"
+    if caseCatcher.timerDuration and caseCatcher.timerStartedAt then
+        local remaining = caseCatcher.timerDuration - (getGameTimer() / 1000 - caseCatcher.timerStartedAt)
+        if remaining > 0 then
+            remainingText = string.format("%02d:%02d:%02d",
+                math.floor(remaining / 3600),
+                math.floor((remaining % 3600) / 60),
+                math.floor(remaining % 60))
+        else
+            remainingText = "00:00:00"
+        end
+    end
+
+    Ui.group(ru("Автопокупка кейсов"), {
+        { kind = "switch", id = "case_enabled", title = ru("Автопокупка"),
+          desc = ru("Отправлять корзину при истечении таймера"), ptr = caseCatcher.enabled },
+        { title = ru("До следующей покупки"), desc = remainingText },
+    })
+
+    Ui.group(ru("Количества"), {
+        { kind = "custom", h = #caseCatcher.categories * 42, draw = function(x, y, wd, h)
+            local cy = y
+            for _, category in ipairs(caseCatcher.categories) do
+                local quantity = caseCatcher.quantities[category.id]
+                text(imgui.GetWindowDrawList(), x + 16, cy + 10, u32(P.text), u8(category.name), Fonts.bold)
+                local controlsX = x + wd - 118
+                imgui.SetCursorScreenPos(ImVec2(controlsX, cy))
+                if Ui.button("case_minus_" .. category.id, "-", 32, 32, "default") then
+                    quantity[0] = math.max(0, quantity[0] - 1)
+                end
+                text(imgui.GetWindowDrawList(), controlsX + 38, cy + 8, u32(P.text), tostring(quantity[0]), Fonts.bold)
+                imgui.SetCursorScreenPos(ImVec2(controlsX + 54, cy))
+                if Ui.button("case_plus_" .. category.id, "+", 32, 32, "accent") then
+                    quantity[0] = math.min(99, quantity[0] + 1)
+                end
+                cy = cy + 42
+            end
+        end },
     })
 end
 
@@ -2305,6 +2467,7 @@ local function renderScript(w)
         { title = ru("Поезд"), desc = ru("/msh — переключить, /train — открыть страницу поезда") },
         { title = "\206\245\238\242\224", desc = "/les - \238\242\234\240\251\242\252 \241\242\240\224\237\232\246\243, /ohota - \239\229\240\229\234\235\254\247\232\242\252 \236\238\228\243\235\252" },
         { title = ru("Свалка"), desc = ru("/") .. svalka.settings.cmd .. ru(" — страница, /") .. svalka.settings.cmdact .. ru(" — включить или выключить метки") },
+        { title = ru("Кейсы"), desc = ru("/case — открыть страницу автопокупки кейсов") },
     })
 
     Ui.group(ru("Обновления"), {
@@ -2391,13 +2554,13 @@ local function renderSidebar(winPos)
     -- ���������
     local navY = 78
     for i, tab in ipairs(Tabs) do
-        imgui.SetCursorPos(ImVec2(SB_X + 10, navY + (i - 1) * 34))
-        imgui.InvisibleButton("##nav" .. i, ImVec2(SB_W - 20, 34))
+        imgui.SetCursorPos(ImVec2(SB_X + 10, navY + (i - 1) * 32))
+        imgui.InvisibleButton("##nav" .. i, ImVec2(SB_W - 20, 32))
         local hovered = imgui.IsItemHovered()
         if imgui.IsItemClicked() then State.tab = i end
         local mn = imgui.GetItemRectMin()
         local active = (i == State.tab)
-        local x1, y1, x2, y2 = mn.x, mn.y, mn.x + SB_W - 20, mn.y + 34
+        local x1, y1, x2, y2 = mn.x, mn.y, mn.x + SB_W - 20, mn.y + 32
         if active then
             dl:AddRectFilledMultiColor(ImVec2(x1, y1), ImVec2(x2, y2),
                 u32(P.accent, 0.30), u32(P.accent, 0.06), u32(P.accent, 0.06), u32(P.accent, 0.30))
@@ -2406,22 +2569,22 @@ local function renderSidebar(winPos)
             dl:AddRectFilled(ImVec2(x1, y1), ImVec2(x2, y2), u32(P.cardHi, 0.6), 10)
         end
         local col = active and P.text or (hovered and P.text or P.muted)
-        drawNavIcon(dl, tab[3], x1 + 24, y1 + 17, active and P.accent or col)
-        text(dl, x1 + 46, y1 + 8, u32(col), u8(tab[1]), Fonts.bold)
+        drawNavIcon(dl, tab[3], x1 + 24, y1 + 16, active and P.accent or col)
+        text(dl, x1 + 46, y1 + 7, u32(col), u8(tab[1]), Fonts.bold)
         -- ��������� ����������� ������
         if (i == TAB_FISH and bot.on) or (i == TAB_TRUCK and truck.enabled)
             or (i == TAB_TRAIN and trainbot.enabled) or (i == TAB_OHOTA and Ohota.enabled)
-            or (i == TAB_SVALKA and svalka.active[0]) then
-            dl:AddCircleFilled(ImVec2(x2 - 14, y1 + 17), 3.5 + 0.8 * math_sin(now() * 4), u32(P.success), 12)
+            or (i == TAB_SVALKA and svalka.active[0]) or (i == TAB_CASE and caseCatcher.enabled[0]) then
+            dl:AddCircleFilled(ImVec2(x2 - 14, y1 + 16), 3.5 + 0.8 * math_sin(now() * 4), u32(P.success), 12)
         end
     end
 
     -- ���� ���������� ������� ������� (������ �� ����)
     local running = runningModule()
     local cur = currentModule()
-    local bx, by = px + 10, py + H - SB_X * 2 - 186
-    dl:AddRectFilled(ImVec2(bx, by), ImVec2(bx + SB_W - 20, by + 176), u32(P.bg, 0.7), 12)
-    dl:AddRect(ImVec2(bx, by), ImVec2(bx + SB_W - 20, by + 176),
+    local bx, by = px + 10, py + H - SB_X * 2 - 174
+    dl:AddRectFilled(ImVec2(bx, by), ImVec2(bx + SB_W - 20, by + 164), u32(P.bg, 0.7), 12)
+    dl:AddRect(ImVec2(bx, by), ImVec2(bx + SB_W - 20, by + 164),
         u32(running and P.accent or P.border, running and 0.5 or 0.7), 12, nil, 1)
     local pulse = running and (1.2 * math_sin(now() * 4)) or 0
     dl:AddCircleFilled(ImVec2(bx + 18, by + 22), 4.5 + pulse, u32(running and P.success or P.dim), 14)
@@ -2442,9 +2605,11 @@ local function renderSidebar(winPos)
     if shown == "hunt" then info = "\204\238\228\243\235\252 \238\245\238\242\251" end
     if running then text(dl, bx + 14, by + 54, u32(P.dim), u8(info), Fonts.smallBold) end
 
-    imgui.SetCursorScreenPos(ImVec2(bx + 12, by + 80))
-    if Ui.button("toggle", running and ru("Остановить") or ru("Запустить"), SB_W - 44, 44, running and "danger" or "accent") then
-        if running == "fish" then stopBot()
+    imgui.SetCursorScreenPos(ImVec2(bx + 12, by + 74))
+    if Ui.button("toggle", running and ru("Остановить") or ru("Запустить"), SB_W - 44, 40, running and "danger" or "accent") then
+        if running == "case" then caseCatcher.enabled[0] = false
+        elseif cur == "case" and not running then caseCatcher.enabled[0] = true
+        elseif running == "fish" then stopBot()
         elseif running == "truck" then stopTrucking()
         elseif running == "train" then toggleTrain()
         elseif running == "hunt" then toggleOhota()
@@ -2455,8 +2620,8 @@ local function renderSidebar(winPos)
         elseif cur == "svalka" then svalka.toggle()
         else startBot() end
     end
-    text(dl, bx + 14, by + 138, u32(P.dim), u8(keyNames[S.menuKey[0] + 1] .. ru(" — открыть меню")), Fonts.smallBold)
-    text(dl, bx + 14, by + 154, u32(P.dim), u8("/sfradmira  |  /fb"), Fonts.smallBold)
+    text(dl, bx + 14, by + 126, u32(P.dim), u8(keyNames[S.menuKey[0] + 1] .. ru(" — открыть меню")), Fonts.smallBold)
+    text(dl, bx + 14, by + 142, u32(P.dim), u8("/sfradmira  |  /fb"), Fonts.smallBold)
 end
 
 local function renderTopbar(winPos, winSize)
@@ -2542,6 +2707,8 @@ local function renderMain()
         renderOhota(w)
     elseif State.tab == TAB_SVALKA then
         svalka.render(w)
+    elseif State.tab == TAB_CASE then
+        renderCase(w)
     else
         renderTrain(w)
     end
@@ -2801,15 +2968,9 @@ svalka.checkUpdate = function()
                 svalka.updater.message = ru("Установлен актуальный файл")
                 return
             end
-
-            if ffi.C.MoveFileExA(svalka.updater.tempPath, svalka.updater.targetPath, 1) == 0 then
-                os.remove(svalka.updater.tempPath)
-                svalka.updater.message = ru("Не удалось установить обновление")
-                print("[SofterRadmira Hub] Failed to replace the installed Hub script")
-                return
-            end
-            sampAddChatMessage("{FF3844}[SofterRadmira] {FFFFFF}" .. ru("Обновление установлено. Перезапуск Hub..."), -1)
-            thisScript():reload()
+            os.remove(svalka.updater.tempPath)
+            svalka.updater.message = ru("Локальная сборка с модулем Кейсы")
+            print("[SofterRadmira Hub] Automatic replacement disabled for local modified build")
         end
     end)
 end
@@ -2822,7 +2983,7 @@ function main()
     while not isSampAvailable() do wait(100) end
 
     sampRegisterChatCommand("fish", toggleMenu)
-    sampRegisterChatCommand("sfradmira", function()
+    local openHubMenu = function()
         -- ��������� ����� ���� �� �������, ��� ����� ����� ��� ������
         if State.window[0] then
             State.window[0] = false
@@ -2830,7 +2991,9 @@ function main()
             State.tab = TAB_HOME
             State.window[0] = true
         end
-    end)
+    end
+    sampRegisterChatCommand("sfradmira", openHubMenu)
+    sampRegisterChatCommand("sfradmria", openHubMenu)
     sampRegisterChatCommand("fb", toggleBot)
     sampRegisterChatCommand("truck", function()
         State.tab = TAB_TRUCK
@@ -2846,6 +3009,10 @@ function main()
         State.window[0] = true
     end)
     sampRegisterChatCommand("ohota", toggleOhota)
+    sampRegisterChatCommand("case", function()
+        State.tab = TAB_CASE
+        State.window[0] = true
+    end)
     if svalka.settings.cmd ~= "" then sampRegisterChatCommand(svalka.settings.cmd, svalka.showPage) end
     if svalka.settings.cmdact ~= "" then sampRegisterChatCommand(svalka.settings.cmdact, svalka.toggle) end
 
@@ -2902,6 +3069,8 @@ function main()
             svalka.saveTime = nil
             svalka.saveConfig()
         end
+
+        caseCatcher.update()
 
         if hotkeyAvailable() and isKeyDown(vkeys.VK_CONTROL) and wasKeyPressed(vkeys.VK_B) then
             State.tab = TAB_SVALKA
