@@ -2927,8 +2927,10 @@ end)
 
 --================= MAIN =================--
 svalka.updater = {
-    url = "https://raw.githubusercontent.com/lunguvictor/SofterRadmiraHub/main/SofterRadmiraHub.lua",
+    apiUrl = "https://api.github.com/repos/lunguvictor/SofterRadmiraHub/commits/main",
+    rawUrl = "https://raw.githubusercontent.com/lunguvictor/SofterRadmiraHub/",
     status = require("moonloader").download_status,
+    apiTempPath = getWorkingDirectory() .. "\\SofterRadmiraHub.commit.tmp",
     tempPath = getWorkingDirectory() .. "\\SofterRadmiraHub.update.tmp",
     targetPath = nil,
     inProgress = false,
@@ -2936,39 +2938,67 @@ svalka.updater = {
     message = ru("Автопроверка при запуске"),
 }
 
+local function failHubUpdate(message, logMessage)
+    svalka.updater.inProgress = false
+    svalka.updater.message = ru(message)
+    os.remove(svalka.updater.apiTempPath)
+    os.remove(svalka.updater.tempPath)
+    print("[SofterRadmira Hub] " .. logMessage)
+end
+
 svalka.checkUpdate = function()
     if svalka.updater.inProgress then return end
     svalka.updater.inProgress = true
     svalka.updater.startedAt = os.time()
     svalka.updater.message = ru("Проверка GitHub...")
     svalka.updater.targetPath = thisScript().path
+    os.remove(svalka.updater.apiTempPath)
     os.remove(svalka.updater.tempPath)
 
-    local updateUrl = svalka.updater.url .. "?t=" .. tostring(os.time()) .. tostring(getGameTimer())
-    downloadUrlToFile(updateUrl, svalka.updater.tempPath, function(id, status)
+    local nonce = tostring(os.time()) .. tostring(getGameTimer())
+    local commitApiUrl = svalka.updater.apiUrl .. "?t=" .. nonce
+    downloadUrlToFile(commitApiUrl, svalka.updater.apiTempPath, function(id, status)
         if not svalka.updater.inProgress then return end
-        if status == svalka.updater.status.STATUS_ENDDOWNLOADDATA then
+        if status ~= svalka.updater.status.STATUS_ENDDOWNLOADDATA then return end
+
+        local apiFile = io.open(svalka.updater.apiTempPath, "rb")
+        if not apiFile then
+            failHubUpdate("Не удалось прочитать ответ GitHub", "Failed to read the GitHub commit response")
+            return
+        end
+        local apiResponse = apiFile:read("*a")
+        apiFile:close()
+        os.remove(svalka.updater.apiTempPath)
+
+        local ok, commitData = pcall(decodeJson, apiResponse)
+        local commitSha = ok and type(commitData) == "table" and commitData.sha or nil
+        if type(commitSha) ~= "string" or #commitSha ~= 40 or not commitSha:match("^[%da-fA-F]+$") then
+            failHubUpdate("Не удалось получить SHA коммита GitHub", "GitHub did not return a valid commit SHA")
+            return
+        end
+
+        svalka.updater.message = ru("Загрузка коммита ") .. commitSha:sub(1, 7)
+        local updateUrl = svalka.updater.rawUrl .. commitSha .. "/SofterRadmiraHub.lua"
+        downloadUrlToFile(updateUrl, svalka.updater.tempPath, function(id, status)
+            if not svalka.updater.inProgress then return end
+            if status ~= svalka.updater.status.STATUS_ENDDOWNLOADDATA then return end
             svalka.updater.inProgress = false
+
             local updateFile = io.open(svalka.updater.tempPath, "rb")
             if not updateFile then
-                svalka.updater.message = ru("Не удалось прочитать файл обновления")
-                print("[SofterRadmira Hub] Failed to read downloaded update")
+                failHubUpdate("Не удалось прочитать файл обновления", "Failed to read downloaded update")
                 return
             end
             local updatedCode = updateFile:read("*a")
             updateFile:close()
             if not updatedCode or not updatedCode:find('script_name("SofterRadmira Hub")', 1, true) then
-                os.remove(svalka.updater.tempPath)
-                svalka.updater.message = ru("В репозитории нет корректного файла Hub")
-                print("[SofterRadmira Hub] GitHub file is not a valid Hub script")
+                failHubUpdate("В репозитории нет корректного файла Hub", "GitHub file is not a valid Hub script")
                 return
             end
 
             local currentFile = io.open(svalka.updater.targetPath, "rb")
             if not currentFile then
-                os.remove(svalka.updater.tempPath)
-                svalka.updater.message = ru("Не удалось прочитать текущий файл Hub")
-                print("[SofterRadmira Hub] Failed to read the installed Hub script")
+                failHubUpdate("Не удалось прочитать текущий файл Hub", "Failed to read the installed Hub script")
                 return
             end
             local currentCode = currentFile:read("*a")
@@ -2978,18 +3008,16 @@ svalka.checkUpdate = function()
                 svalka.updater.message = ru("Установлен актуальный файл")
                 return
             end
+
             if ffi.C.MoveFileExA(svalka.updater.tempPath, svalka.updater.targetPath, 1) == 0 then
-                os.remove(svalka.updater.tempPath)
-                svalka.updater.message = ru("Не удалось установить обновление")
-                print("[SofterRadmira Hub] Failed to replace the installed Hub script")
+                failHubUpdate("Не удалось установить обновление", "Failed to replace the installed Hub script")
                 return
             end
             sampAddChatMessage("{FF3844}[SofterRadmira] {FFFFFF}" .. ru("Обновление установлено. Перезапуск Hub..."), -1)
             thisScript():reload()
-        end
+        end)
     end)
 end
-
 local function toggleMenu() State.window[0] = not State.window[0] end
 local function hotkeyAvailable() return not isPauseMenuActive() and not sampIsChatInputActive() and not sampIsDialogActive() end
 
@@ -3031,7 +3059,7 @@ function main()
     if svalka.settings.cmd ~= "" then sampRegisterChatCommand(svalka.settings.cmd, svalka.showPage) end
     if svalka.settings.cmdact ~= "" then sampRegisterChatCommand(svalka.settings.cmdact, svalka.toggle) end
 
-    sampAddChatMessage("{FF3844}[SofterRadmira] {FFFFFF}" .. ru("Hub запущен 5.2.2 . Меню: ") .. keyNames[S.menuKey[0] + 1] .. ru(" или /sfradmira"), -1)
+    sampAddChatMessage("{FF3844}[SofterRadmira] {FFFFFF}" .. ru("Hub запущен. Меню: ") .. keyNames[S.menuKey[0] + 1] .. ru(" или /sfradmira"), -1)
     if not svalka.loaded then
         sampAddChatMessage("{FF3844}[SofterRadmira] {FFFFFF}" .. (svalka.error or ru("Список Svalka недоступен")), -1)
     end
@@ -3043,6 +3071,7 @@ function main()
         if svalka.updater.inProgress and os.time() - svalka.updater.startedAt > 30 then
             svalka.updater.inProgress = false
             svalka.updater.message = ru("Не удалось получить обновление за 30 секунд")
+            os.remove(svalka.updater.apiTempPath)
             os.remove(svalka.updater.tempPath)
             print("[SofterRadmira Hub] GitHub update download timed out")
         end
