@@ -3081,7 +3081,7 @@ function main()
     if svalka.settings.cmd ~= "" then sampRegisterChatCommand(svalka.settings.cmd, svalka.showPage) end
     if svalka.settings.cmdact ~= "" then sampRegisterChatCommand(svalka.settings.cmdact, svalka.toggle) end
 
-    sampAddChatMessage("{FF3844}[SofterRadmira] {FFFFFF}" .. ru("Hub запущен 5.2.2 . Меню: ") .. keyNames[S.menuKey[0] + 1] .. ru(" или /sfradmira"), -1)
+    sampAddChatMessage("{FF3844}[SofterRadmira] {FFFFFF}" .. ru("Hub запущен 5.2.3 . Меню: ") .. keyNames[S.menuKey[0] + 1] .. ru(" или /sfradmira"), -1)
     if not svalka.loaded then
         sampAddChatMessage("{FF3844}[SofterRadmira] {FFFFFF}" .. (svalka.error or ru("Список Svalka недоступен")), -1)
     end
