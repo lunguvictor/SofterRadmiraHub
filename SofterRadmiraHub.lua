@@ -2931,6 +2931,7 @@ svalka.updater = {
     rawUrl = "https://raw.githubusercontent.com/lunguvictor/SofterRadmiraHub/",
     status = require("moonloader").download_status,
     apiTempPath = getWorkingDirectory() .. "\\SofterRadmiraHub.commit.tmp",
+    configTempPath = svalka.configPath .. ".download.tmp",
     tempPath = getWorkingDirectory() .. "\\SofterRadmiraHub.update.tmp",
     targetPath = nil,
     inProgress = false,
@@ -2951,8 +2952,119 @@ local function failHubUpdate(message, logMessage)
     svalka.updater.inProgress = false
     svalka.updater.message = ru(message)
     os.remove(svalka.updater.apiTempPath)
+    os.remove(svalka.updater.configTempPath)
     os.remove(svalka.updater.tempPath)
     print("[SofterRadmira Hub] " .. logMessage)
+end
+
+local function downloadHubScript(commitSha, configWasInstalled)
+    svalka.updater.message = ru("Загрузка коммита ") .. commitSha:sub(1, 7)
+    local updateUrl = svalka.updater.rawUrl .. commitSha .. "/SofterRadmiraHub.lua"
+    downloadUrlToFile(updateUrl, svalka.updater.tempPath, function(id, status)
+        if not svalka.updater.inProgress then return end
+        if status ~= svalka.updater.status.STATUS_ENDDOWNLOADDATA then return end
+
+        lua_thread.create(function()
+            wait(0)
+            if not svalka.updater.inProgress then return end
+
+            local updateFile = openHubUpdateFile(svalka.updater.tempPath)
+            if not updateFile then
+                if not svalka.updater.inProgress then return end
+                failHubUpdate("Не удалось прочитать файл обновления", "Failed to read downloaded update")
+                return
+            end
+
+            local updatedCode = updateFile:read("*a")
+            updateFile:close()
+            if not updatedCode or not updatedCode:find('script_name("SofterRadmira Hub")', 1, true) then
+                failHubUpdate("В репозитории нет корректного файла Hub", "GitHub file is not a valid Hub script")
+                return
+            end
+
+            local currentFile = io.open(svalka.updater.targetPath, "rb")
+            if not currentFile then
+                failHubUpdate("Не удалось прочитать текущий файл Hub", "Failed to read the installed Hub script")
+                return
+            end
+            local currentCode = currentFile:read("*a")
+            currentFile:close()
+            if currentCode == updatedCode then
+                os.remove(svalka.updater.tempPath)
+                svalka.updater.inProgress = false
+                svalka.updater.message = ru("Установлен актуальный файл")
+                if configWasInstalled then
+                    sampAddChatMessage("{FF3844}[SofterRadmira] {FFFFFF}" .. ru("Список Svalka загружен. Перезапуск Hub..."), -1)
+                    thisScript():reload()
+                end
+                return
+            end
+
+            if ffi.C.MoveFileExA(svalka.updater.tempPath, svalka.updater.targetPath, 1) == 0 then
+                failHubUpdate("Не удалось установить обновление", "Failed to replace the installed Hub script")
+                return
+            end
+            svalka.updater.inProgress = false
+            sampAddChatMessage("{FF3844}[SofterRadmira] {FFFFFF}" .. ru("Обновление установлено. Перезапуск Hub..."), -1)
+            thisScript():reload()
+        end)
+    end)
+end
+
+local function downloadSvalkaConfig(commitSha)
+    local function continueWithoutConfig(logMessage)
+        os.remove(svalka.updater.configTempPath)
+        svalka.updater.message = ru("Не удалось загрузить JSON списка Svalka")
+        print("[SofterRadmira Hub] " .. logMessage)
+        downloadHubScript(commitSha, false)
+    end
+
+    svalka.updater.message = ru("Загрузка списка Svalka...")
+    local configUrl = svalka.updater.rawUrl .. commitSha .. "/config/svalka_items.json"
+    downloadUrlToFile(configUrl, svalka.updater.configTempPath, function(id, status)
+        if not svalka.updater.inProgress then return end
+        if status ~= svalka.updater.status.STATUS_ENDDOWNLOADDATA then return end
+
+        lua_thread.create(function()
+            wait(0)
+            if not svalka.updater.inProgress then return end
+
+            local configFile = openHubUpdateFile(svalka.updater.configTempPath)
+            if not configFile then
+                if not svalka.updater.inProgress then return end
+                continueWithoutConfig("Failed to read downloaded Svalka JSON")
+                return
+            end
+            local configContents = configFile:read("*a")
+            configFile:close()
+
+            local ok, configData = pcall(decodeJson, configContents)
+            if not ok or type(configData) ~= "table" or type(configData.items) ~= "table" then
+                continueWithoutConfig("GitHub Svalka JSON is invalid or missing")
+                return
+            end
+            for _, item in ipairs(configData.items) do
+                if type(item) ~= "table" or item.model_id == nil or type(item.item_name) ~= "string" then
+                    continueWithoutConfig("GitHub Svalka JSON contains an invalid item")
+                    return
+                end
+            end
+
+            local existingConfig = io.open(svalka.configPath, "rb")
+            if existingConfig then
+                existingConfig:close()
+                os.remove(svalka.updater.configTempPath)
+                downloadHubScript(commitSha, true)
+                return
+            end
+
+            if ffi.C.MoveFileExA(svalka.updater.configTempPath, svalka.configPath, 1) == 0 then
+                continueWithoutConfig("Failed to install downloaded Svalka JSON")
+                return
+            end
+            downloadHubScript(commitSha, true)
+        end)
+    end)
 end
 
 svalka.checkUpdate = function()
@@ -2962,6 +3074,7 @@ svalka.checkUpdate = function()
     svalka.updater.message = ru("Проверка GitHub...")
     svalka.updater.targetPath = thisScript().path
     os.remove(svalka.updater.apiTempPath)
+    os.remove(svalka.updater.configTempPath)
     os.remove(svalka.updater.tempPath)
 
     local nonce = tostring(os.time()) .. tostring(getGameTimer())
@@ -2991,52 +3104,13 @@ svalka.checkUpdate = function()
                 return
             end
 
-            svalka.updater.message = ru("Загрузка коммита ") .. commitSha:sub(1, 7)
-            local updateUrl = svalka.updater.rawUrl .. commitSha .. "/SofterRadmiraHub.lua"
-            downloadUrlToFile(updateUrl, svalka.updater.tempPath, function(id, status)
-                if not svalka.updater.inProgress then return end
-                if status ~= svalka.updater.status.STATUS_ENDDOWNLOADDATA then return end
-
-                lua_thread.create(function()
-                    wait(0)
-                    if not svalka.updater.inProgress then return end
-
-                    local updateFile = openHubUpdateFile(svalka.updater.tempPath)
-                    if not updateFile then
-                        if not svalka.updater.inProgress then return end
-                        failHubUpdate("Не удалось прочитать файл обновления", "Failed to read downloaded update")
-                        return
-                    end
-                    svalka.updater.inProgress = false
-
-                    local updatedCode = updateFile:read("*a")
-                    updateFile:close()
-                    if not updatedCode or not updatedCode:find('script_name("SofterRadmira Hub")', 1, true) then
-                        failHubUpdate("В репозитории нет корректного файла Hub", "GitHub file is not a valid Hub script")
-                        return
-                    end
-
-                    local currentFile = io.open(svalka.updater.targetPath, "rb")
-                    if not currentFile then
-                        failHubUpdate("Не удалось прочитать текущий файл Hub", "Failed to read the installed Hub script")
-                        return
-                    end
-                    local currentCode = currentFile:read("*a")
-                    currentFile:close()
-                    if currentCode == updatedCode then
-                        os.remove(svalka.updater.tempPath)
-                        svalka.updater.message = ru("Установлен актуальный файл")
-                        return
-                    end
-
-                    if ffi.C.MoveFileExA(svalka.updater.tempPath, svalka.updater.targetPath, 1) == 0 then
-                        failHubUpdate("Не удалось установить обновление", "Failed to replace the installed Hub script")
-                        return
-                    end
-                    sampAddChatMessage("{FF3844}[SofterRadmira] {FFFFFF}" .. ru("Обновление установлено. Перезапуск Hub..."), -1)
-                    thisScript():reload()
-                end)
-            end)
+            local configFile = io.open(svalka.configPath, "rb")
+            if configFile then
+                configFile:close()
+                downloadHubScript(commitSha, false)
+            else
+                downloadSvalkaConfig(commitSha)
+            end
         end)
     end)
 end
@@ -3094,6 +3168,7 @@ function main()
             svalka.updater.inProgress = false
             svalka.updater.message = ru("Не удалось получить обновление за 30 секунд")
             os.remove(svalka.updater.apiTempPath)
+            os.remove(svalka.updater.configTempPath)
             os.remove(svalka.updater.tempPath)
             print("[SofterRadmira Hub] GitHub update download timed out")
         end
