@@ -2944,7 +2944,8 @@ svalka.checkUpdate = function()
     svalka.updater.targetPath = thisScript().path
     os.remove(svalka.updater.tempPath)
 
-    downloadUrlToFile(svalka.updater.url, svalka.updater.tempPath, function(id, status)
+    local updateUrl = svalka.updater.url .. "?t=" .. tostring(os.time()) .. tostring(getGameTimer())
+    downloadUrlToFile(updateUrl, svalka.updater.tempPath, function(id, status)
         if not svalka.updater.inProgress then return end
         if status == svalka.updater.status.STATUS_ENDDOWNLOADDATA then
             svalka.updater.inProgress = false
@@ -2977,9 +2978,14 @@ svalka.checkUpdate = function()
                 svalka.updater.message = ru("Установлен актуальный файл")
                 return
             end
-            os.remove(svalka.updater.tempPath)
-            svalka.updater.message = ru("Локальная сборка с модулем Кейсы")
-            print("[SofterRadmira Hub] Automatic replacement disabled for local modified build")
+            if ffi.C.MoveFileExA(svalka.updater.tempPath, svalka.updater.targetPath, 1) == 0 then
+                os.remove(svalka.updater.tempPath)
+                svalka.updater.message = ru("Не удалось установить обновление")
+                print("[SofterRadmira Hub] Failed to replace the installed Hub script")
+                return
+            end
+            sampAddChatMessage("{FF3844}[SofterRadmira] {FFFFFF}" .. ru("Обновление установлено. Перезапуск Hub..."), -1)
+            thisScript():reload()
         end
     end)
 end
