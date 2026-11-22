@@ -1,7 +1,7 @@
 script_name("SofterRadmira Hub")
 script_description("SofterRadmira Hub: fishing, trucking, train, hunting, and Svalka")
 script_author("SofterRadmira")
-script_version("5.2.2")
+script_version("5.2.4")
 
 local imgui    = require("mimgui")
 local encoding = require("encoding")
@@ -307,7 +307,7 @@ local ImVec2 = imgui.ImVec2
 local ImVec4 = imgui.ImVec4
 local Cond   = imgui.Cond
 
-local VERSION  = "5.2.3"
+local VERSION  = "5.2.4"
 local INI_NAME = "SofterRadmiraFish_red.ini"
 
 --================= ��������� =================--
@@ -326,6 +326,12 @@ local DEFAULTS = {
     Hud = true, HudPos = 0,
     MenuKey = 0,
     TruckMax = true, TruckMinPrice = "10000", TruckType = 0, TruckDebug = false,
+    AutoUpdate = false,
+    TelegramEnabled = false,
+    TelegramChatId = "",
+    TelegramToken = "",
+    TelegramDisconnect = true,
+    TelegramAdmin = true,
 }
 
 local config = inicfg.load({ Settings = DEFAULTS }, INI_NAME)
@@ -453,6 +459,12 @@ local S = {
     truckPrice  = imgui.new.char[128](tostring(cs.TruckMinPrice)),
     truckType   = imgui.new.int(tonumber(cs.TruckType) or 0),
     truckDebug  = imgui.new.bool(cs.TruckDebug),
+    autoUpdate  = imgui.new.bool(cs.AutoUpdate),
+    telegramEnabled = imgui.new.bool(cs.TelegramEnabled),
+    telegramChatId = imgui.new.char[64](tostring(cs.TelegramChatId)),
+    telegramToken = imgui.new.char[128](tostring(cs.TelegramToken)),
+    telegramDisconnect = imgui.new.bool(cs.TelegramDisconnect),
+    telegramAdmin = imgui.new.bool(cs.TelegramAdmin),
 }
 
 local dirty, lastSave = false, 0
@@ -475,9 +487,263 @@ local function save_config()
     cs.TruckMinPrice = ffi.string(S.truckPrice)
     cs.TruckType = S.truckType[0]
     cs.TruckDebug = S.truckDebug[0]
+    cs.AutoUpdate = S.autoUpdate[0]
+    cs.TelegramEnabled = S.telegramEnabled[0]
+    cs.TelegramChatId = ffi.string(S.telegramChatId)
+    cs.TelegramToken = ffi.string(S.telegramToken)
+    cs.TelegramDisconnect = S.telegramDisconnect[0]
+    cs.TelegramAdmin = S.telegramAdmin[0]
     inicfg.save(config, INI_NAME)
     dirty = false
     lastSave = os.clock()
+end
+
+do
+    ffi.cdef[[
+    typedef struct {
+        unsigned long cb; char* lpReserved; char* lpDesktop; char* lpTitle;
+        unsigned long dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars;
+        unsigned long dwFillAttribute, dwFlags;
+        unsigned short wShowWindow, cbReserved2;
+        char* lpReserved2;
+        void* hStdInput;
+        void* hStdOutput;
+        void* hStdError;
+    } SR_TG_STARTUPINFO;
+    typedef struct { void* hProcess; void* hThread; unsigned long dwProcessId, dwThreadId; } SR_TG_PROCESS_INFO;
+    int CreateProcessA(const char* app, char* cmd, void* pa, void* ta, int inherit, unsigned long flags, void* env, const char* dir, SR_TG_STARTUPINFO* si, SR_TG_PROCESS_INFO* pi);
+    unsigned long WaitForSingleObject(void* h, unsigned long ms);
+    int TerminateProcess(void* h, unsigned int exitCode);
+    int CloseHandle(void* h);
+    ]]
+
+    local TG = {
+        queue = {},
+        running = false,
+        initializedFor = "",
+        updateId = 0,
+        nextPoll = 0,
+        curlPath = nil,
+        requestId = 0,
+        tmpDir = os.getenv("TEMP") or os.getenv("TMP") or ".",
+    }
+
+    do
+        local root = os.getenv("SystemRoot") or "C:\\Windows"
+        for _, path in ipairs({ root .. "\\Sysnative\\curl.exe", root .. "\\System32\\curl.exe" }) do
+            local file = io.open(path, "rb")
+            if file then
+                file:close()
+                TG.curlPath = path
+                break
+            end
+        end
+    end
+
+    function TG.credentials()
+        local chatId = ffi.string(S.telegramChatId):match("^%s*(.-)%s*$")
+        local token = ffi.string(S.telegramToken):match("^%s*(.-)%s*$")
+        if not S.telegramEnabled[0] or chatId == "" or token == "" then return nil, nil end
+        return chatId, token
+    end
+
+    function TG.encodeUrl(text)
+        return (text:gsub("[^%w%-_%.~]", function(char)
+            return string.format("%%%02X", string.byte(char))
+        end))
+    end
+
+    function TG.request(url)
+        if not TG.curlPath then return nil, "curl.exe is unavailable" end
+        TG.requestId = TG.requestId + 1
+        local output = TG.tmpDir .. "\\sr_tg_" .. TG.requestId .. ".tmp"
+        local command = string.format('"%s" -s -m 8 --ssl-no-revoke -o "%s" "%s"', TG.curlPath, output, url)
+        local commandBuffer = ffi.new("char[?]", #command + 1)
+        ffi.copy(commandBuffer, command)
+        local startup = ffi.new("SR_TG_STARTUPINFO")
+        startup.cb = ffi.sizeof(startup)
+        local process = ffi.new("SR_TG_PROCESS_INFO")
+        if ffi.C.CreateProcessA(nil, commandBuffer, nil, nil, 0, 0x08000000, nil, nil, startup, process) == 0 then
+            os.remove(output)
+            return nil, "CreateProcessA failed"
+        end
+        local waited = 0
+        while ffi.C.WaitForSingleObject(process.hProcess, 0) ~= 0 and waited < 10000 do
+            wait(50)
+            waited = waited + 50
+        end
+        if waited >= 10000 then ffi.C.TerminateProcess(process.hProcess, 1) end
+        ffi.C.CloseHandle(process.hProcess)
+        ffi.C.CloseHandle(process.hThread)
+        local body
+        local file = io.open(output, "rb")
+        if file then
+            body = file:read("*a")
+            file:close()
+        end
+        os.remove(output)
+        if body and #body > 0 then return body end
+        return nil, waited >= 10000 and "Telegram request timed out" or "Telegram returned an empty response"
+    end
+
+    function TG.enqueue(text)
+        if not TG.credentials() then return end
+        if #TG.queue >= 50 then
+            print("[SofterRadmira Hub] Telegram queue is full; notification was dropped")
+            return
+        end
+        TG.queue[#TG.queue + 1] = { method = "sendMessage", text = text }
+    end
+
+    function TG.api(method, params)
+        local chatId, token = TG.credentials()
+        if not chatId then return nil, "Telegram is disabled or not configured" end
+        local url = "https://api.telegram.org/bot" .. token .. "/" .. method
+        if params then url = url .. "?" .. params end
+        local body, err = TG.request(url)
+        if not body then return nil, err end
+        local ok, data = pcall(decodeJson, body)
+        if not ok or type(data) ~= "table" or not data.ok then
+            return nil, "Telegram API error: " .. tostring(body)
+        end
+        return data
+    end
+
+    function TG.send(text)
+        local chatId = select(1, TG.credentials())
+        if not chatId then return end
+        local nickname = u8:encode(TG.nickname or "Unknown", "CP1251")
+        local message = string.format("[%s][%s]", nickname, TG.playerId or -1) ..
+            os.date(" %H:%M:%S\n") .. tostring(text):gsub("{......}", "")
+        TG.enqueue("chat_id=" .. TG.encodeUrl(chatId) ..
+            "&text=" .. TG.encodeUrl(message))
+    end
+
+    function TG.processUpdate(update)
+        local message = update.message
+        local chatId = select(1, TG.credentials())
+        if not (message and message.chat and tostring(message.chat.id) == tostring(chatId) and message.text) then return end
+        local text = u8:decode(message.text)
+        local command, argument = text:match("^/(%S+)%s*(.-)%s*$")
+        if command == "info" then
+            local id = select(2, sampGetPlayerIdByCharHandle(PLAYER_PED))
+            TG.send("[" .. u8:encode(sampGetCurrentServerName(), "CP1251") .. "]\n" ..
+                u8:encode(sampGetPlayerNickname(id), "CP1251") .. "\nID: " .. id ..
+                "\nHP: " .. math.floor(getCharHealth(PLAYER_PED)))
+        elseif command == "chat" and argument ~= "" then
+            sampSendChat(argument)
+            TG.send("Сообщение отправлено в чат: " .. u8:encode(argument, "CP1251"))
+        elseif command == "q" then
+            TG.send("Выходим из игры!")
+            deleteChar(PLAYER_PED)
+        elseif command == "getplayers" then
+            TG.send("Игроков на сервере: " .. tostring(#getAllChars() - 1))
+        elseif command == "poweroff" then
+            TG.send("Выключаем компьютер...")
+            os.execute("shutdown -s -t 0")
+        elseif command == "help" then
+            TG.send("/info\n/chat <текст>\n/q\n/getplayers\n/poweroff")
+        end
+    end
+
+    function TG.handleUpdates(data)
+        for _, update in ipairs(data.result or {}) do
+            if update.update_id and update.update_id > TG.updateId then
+                TG.updateId = update.update_id
+            end
+            TG.processUpdate(update)
+        end
+    end
+
+    function TG.worker()
+        if TG.running then return end
+        TG.running = true
+        lua_thread.create(function()
+            while true do
+                local chatId, token = TG.credentials()
+                if chatId then
+                    local identity = chatId .. "|" .. token
+                    if TG.initializedFor ~= identity then
+                        local ok, data, err = pcall(TG.api, "getUpdates", "offset=-1")
+                        if ok and data then
+                            local last = data.result and data.result[#data.result]
+                            TG.updateId = last and last.update_id or 0
+                            TG.initializedFor = identity
+                            TG.nextPoll = 0
+                            TG.enqueue("chat_id=" .. TG.encodeUrl(chatId) ..
+                                "&text=" .. TG.encodeUrl("ХАБ подключён к Telegram."))
+                        else
+                            print("[SofterRadmira Hub] Telegram init failed: " .. tostring(err or data))
+                            wait(5000)
+                        end
+                    elseif #TG.queue > 0 then
+                        local item = table.remove(TG.queue, 1)
+                        local ok, data, err = pcall(TG.api, item.method, item.text)
+                        if not ok or not data then
+                            print("[SofterRadmira Hub] Telegram send failed: " .. tostring(err or data))
+                        end
+                    elseif os.clock() >= TG.nextPoll then
+                        local ok, data, err = pcall(TG.api, "getUpdates", "offset=" .. (TG.updateId + 1))
+                        if ok and data then
+                            local updateOk, updateError = pcall(TG.handleUpdates, data)
+                            if not updateOk then
+                                print("[SofterRadmira Hub] Telegram update failed: " .. tostring(updateError))
+                            end
+                            TG.nextPoll = os.clock() + 5
+                        else
+                            print("[SofterRadmira Hub] Telegram poll failed: " .. tostring(err or data))
+                            TG.nextPoll = os.clock() + 10
+                        end
+                    else
+                        wait(250)
+                    end
+                else
+                    TG.initializedFor = ""
+                    wait(1000)
+                end
+            end
+        end)
+    end
+
+    function TG.onDisconnectPacket(id)
+        if (id == 32 or id == 33 or id == 36 or id == 37)
+            and not TG.disconnected and S.telegramDisconnect[0] and TG.credentials() then
+            TG.disconnected = true
+            TG.send("Отключились от сервера.")
+        end
+    end
+
+    function TG.onSendRpc(id)
+        if id == 25 and TG.disconnected and S.telegramDisconnect[0] and TG.credentials() then
+            TG.disconnected = false
+            TG.send("Вошли обратно на сервер.")
+        end
+    end
+
+    function TG.onServerMessage(text)
+        if not S.telegramAdmin[0] or not TG.credentials() then return end
+        local adminWord = string.char(192, 228, 236, 232, 237, 232, 241, 242, 240, 224, 242, 238, 240)
+        local toWord = string.char(228, 235, 255)
+        local name = TG.nickname or ""
+        local isReportReply = text:find("[RADMIR]", 1, true) ~= nil
+        local isAdminChat = text:find("[A]", 1, true) ~= nil and text:find(name, 1, true) == nil
+        local isAdminPm = text:find(adminWord, 1, true) ~= nil
+            and text:find(toWord .. " " .. name, 1, true) ~= nil
+        if isReportReply or isAdminChat or isAdminPm then
+            TG.send("Написал админ: " .. u8:encode(text, "CP1251"))
+        end
+    end
+
+    function TG.start()
+        TG.playerId = select(2, sampGetPlayerIdByCharHandle(PLAYER_PED))
+        TG.nickname = sampGetPlayerNickname(TG.playerId)
+        if not TG.curlPath then
+            print("[SofterRadmira Hub] Telegram disabled: curl.exe not found")
+        end
+        TG.worker()
+    end
+
+    S.telegram = TG
 end
 
 --================= ������ � ������� =================--
@@ -1476,6 +1742,7 @@ function ev.onSendPlayerSync(data)
 end
 
 function onReceivePacket(id, bs)
+    if S.telegram then S.telegram.onDisconnectPacket(id) end
     if id ~= 215 then return end
     ohotaOnPacket(bs)
     trainbot.onPacket(id, bs)
@@ -1486,6 +1753,14 @@ function onReceivePacket(id, bs)
         if truckPacket(bs) == false then return false end
     end
     if bot.on then fishPacket(bs) end
+end
+
+function onSendRpc(id)
+    if S.telegram then S.telegram.onSendRpc(id) end
+end
+
+function ev.onServerMessage(color, text)
+    if S.telegram then S.telegram.onServerMessage(text) end
 end
 
 --================= ������ =================--
@@ -1947,6 +2222,12 @@ local function resetSettings()
     ffi.copy(S.truckPrice, tostring(DEFAULTS.TruckMinPrice))
     S.truckType[0] = DEFAULTS.TruckType
     S.truckDebug[0] = DEFAULTS.TruckDebug
+    S.autoUpdate[0] = DEFAULTS.AutoUpdate
+    S.telegramEnabled[0] = DEFAULTS.TelegramEnabled
+    ffi.copy(S.telegramChatId, tostring(DEFAULTS.TelegramChatId))
+    ffi.copy(S.telegramToken, tostring(DEFAULTS.TelegramToken))
+    S.telegramDisconnect[0] = DEFAULTS.TelegramDisconnect
+    S.telegramAdmin[0] = DEFAULTS.TelegramAdmin
     update_accent()
     save_config()
     Notifications.push("info", ru("Настройки"), ru("Настройки сброшены"))
@@ -2482,6 +2763,8 @@ local function renderScript(w)
     Ui.group(ru("Обновления"), {
         { title = ru("Источник"), desc = "github.com/lunguvictor/SofterRadmiraHub / main" },
         { title = ru("Состояние"), desc = svalka.updater.message },
+        { kind = "switch", id = "auto_update", title = ru("Автообновление"),
+          desc = ru("Проверять GitHub при запуске ХАБа"), ptr = S.autoUpdate, onChange = markDirty },
         { kind = "button", id = "check_hub_update", title = ru("Проверить сейчас"),
           desc = ru("Получить изменения из GitHub без создания релиза"),
           label = ru("Проверить"), variant = "accent", onClick = svalka.checkUpdate },
@@ -2490,6 +2773,40 @@ local function renderScript(w)
     Ui.group(ru("Уведомления"), {
         { kind = "switch", id = "chat", title = ru("Сообщения в чате"), desc = ru("Показывать сообщения о работе модулей"), ptr = S.chat },
         { kind = "switch", id = "notifs", title = ru("Экранные уведомления"), desc = ru("Показывать уведомления при запуске и остановке"), ptr = S.notifs },
+    })
+
+    Ui.group(ru("Telegram"), {
+        { kind = "switch", id = "telegram_enabled", title = ru("Включить Telegram"),
+          desc = ru("Управление бота и уведомления"), ptr = S.telegramEnabled, onChange = markDirty },
+        { kind = "custom", h = 42, title = ru("Chat ID"), desc = ru("Идентификатор чата или группы"), draw = function(x, y, wd, h)
+            imgui.SetCursorScreenPos(ImVec2(x + wd - 16 - 220, y + (h - 22) * 0.5))
+            imgui.PushItemWidth(220)
+            if imgui.InputText("##telegram_chat_id", S.telegramChatId, ffi.sizeof(S.telegramChatId)) then markDirty() end
+            imgui.PopItemWidth()
+        end },
+        { kind = "custom", h = 42, title = ru("Bot Token"), desc = ru("Токен бота из @BotFather"), draw = function(x, y, wd, h)
+            imgui.SetCursorScreenPos(ImVec2(x + wd - 16 - 220, y + (h - 22) * 0.5))
+            imgui.PushItemWidth(220)
+            if imgui.InputText("##telegram_token", S.telegramToken, ffi.sizeof(S.telegramToken)) then markDirty() end
+            imgui.PopItemWidth()
+        end },
+        { kind = "switch", id = "telegram_disconnect", title = ru("Отключения от сервера"),
+          desc = ru("Уведомлять о потере и восстановлении сети"), ptr = S.telegramDisconnect, onChange = markDirty },
+        { kind = "switch", id = "telegram_admin", title = ru("Сообщения администрации"),
+          desc = ru("Пересылать ответы репортов и админ-чата"), ptr = S.telegramAdmin, onChange = markDirty },
+        { title = ru("Команды бота"), desc = "/info, /chat <текст>, /getplayers, /help, /q, /poweroff" },
+        { kind = "button", id = "telegram_save", title = ru("Применить Telegram"),
+          desc = ru("Сохранить настройки Telegram прямо в ХАБе"),
+          label = ru("Сохранить"), variant = "accent", onClick = function()
+            save_config()
+            Notifications.push("info", ru("Telegram"), ru("Настройки сохранены"))
+        end },
+        { kind = "button", id = "telegram_test", title = ru("Тестовое сообщение"),
+          desc = ru("Отправить проверочное сообщение в Telegram"),
+          label = ru("Отправить"), variant = "default", onClick = function()
+            save_config()
+            S.telegram.send("Проверка Telegram: ХАБ работает.")
+        end },
     })
 
     Ui.group(ru("Действия"), {
@@ -2834,7 +3151,7 @@ local function renderHud()
 end
 
 imgui.OnFrame(
-    function() return #Notifications.items > 0 end,
+    function() return S.notifs[0] and #Notifications.items > 0 end,
     function(frame)
         frame.HideCursor = true
         Notifications.render()
@@ -3121,6 +3438,8 @@ function main()
     if not isSampLoaded() then return end
     while not isSampAvailable() do wait(100) end
 
+    S.telegram.start()
+
     sampRegisterChatCommand("fish", toggleMenu)
     local openHubMenu = function()
         -- ��������� ����� ���� �� �������, ��� ����� ����� ��� ������
@@ -3159,7 +3478,9 @@ function main()
     if not svalka.loaded then
         sampAddChatMessage("{FF3844}[SofterRadmira] {FFFFFF}" .. (svalka.error or ru("Список Svalka недоступен")), -1)
     end
-    svalka.checkUpdate()
+    if S.autoUpdate[0] then
+        svalka.checkUpdate()
+    end
 
     while true do
         wait(0)
