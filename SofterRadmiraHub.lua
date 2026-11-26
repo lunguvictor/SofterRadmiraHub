@@ -307,7 +307,7 @@ local ImVec2 = imgui.ImVec2
 local ImVec4 = imgui.ImVec4
 local Cond   = imgui.Cond
 
-local VERSION  = "5.2.4"
+local VERSION  = "5.2.5"
 local INI_NAME = "SofterRadmiraFish_red.ini"
 
 --================= ��������� =================--
