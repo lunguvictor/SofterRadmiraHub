@@ -898,6 +898,7 @@ local function startBot()
     if trainbot.enabled then trainbot.stop() end
     if stopOhota then stopOhota(true) end
     if svalka.stop then svalka.stop(true) end
+    if ezsim then ezsim.stop(true) end
     bot.on = true
     bot.startedAt = os.time()
     fishRestart()
@@ -930,6 +931,7 @@ svalka.start = function()
     if truck.enabled then stopTrucking(true) end
     if trainbot.enabled then trainbot.stop() end
     if stopOhota then stopOhota(true) end
+    if ezsim then ezsim.stop(true) end
     svalka.active[0] = true
     pushLog(ru("Поиск предметов на свалке запущен"), "success")
     Notifications.push("success", ru("Свалка"), ru("Метки предметов включены"))
@@ -1152,6 +1154,7 @@ local function startTrucking()
     if trainbot.enabled then trainbot.stop() end
     if stopOhota then stopOhota(true) end
     if svalka.stop then svalka.stop(true) end
+    if ezsim then ezsim.stop(true) end
     truck.enabled = true
     truck.last = ""
     pushLog(ru("Дальнобойщик: поиск заказа"), "success")
@@ -1174,9 +1177,18 @@ local function toggleTrucking()
     if truck.enabled then stopTrucking() else startTrucking() end
 end
 
+local TRAIN_STOP_MARGIN = 3.0   -- stop this many meters before the checkpoint centre
+local TRAIN_KMH = 3.67          -- m/s -> "km/h" factor used by the original script
+local TRAIN_MIN_CREEP = 8       -- km/h, keeps the train rolling until the final approach
+
+local function trainbotDebug(fmt, ...)
+    if trainbot.debug then print("[TrainBot] " .. string.format(fmt, ...)) end
+end
+
 local function trainbotHandleText(text)
-    if text:find("Machinist", 1, true) and text:find("setStation", 1, true) then
-        local json = text:match("setStation%('(.*)'%)")
+    if text:find("setStation", 1, true) then
+        trainbotDebug("setStation: %s", text:sub(1, 200))
+        local json = text:match("setStation%('(.*)'%)") or text:match("setStation%((.*)%)")
         if json then
             local ok, data = pcall(decodeJson, json)
             if ok and type(data) == "table" then
@@ -1186,12 +1198,13 @@ local function trainbotHandleText(text)
         end
     end
 
-    local minSpeed, maxSpeed = text:match(
-        'interface%(\'Machinist\'%)%.setSpeed%(\'%["(%d+)%-(%d+)", %d+%]\'%)'
-    )
-    if minSpeed and maxSpeed then
-        trainbot.speed.min = tonumber(minSpeed) or trainbot.speed.min
-        trainbot.speed.max = tonumber(maxSpeed) or trainbot.speed.max
+    if text:find("setSpeed", 1, true) then
+        trainbotDebug("setSpeed: %s", text:sub(1, 200))
+        local minSpeed, maxSpeed = text:match('setSpeed%(.-"(%d+)%s*%-%s*(%d+)"')
+        if minSpeed and maxSpeed then
+            trainbot.speed.min = tonumber(minSpeed) or trainbot.speed.min
+            trainbot.speed.max = tonumber(maxSpeed) or trainbot.speed.max
+        end
     end
 end
 
@@ -1227,74 +1240,122 @@ end
 function trainbot.start()
     if trainbot.enabled then return end
     trainbot.enabled = true
+    trainbot.brakeSample = nil
 end
 
 function trainbot.stop()
     if not trainbot.enabled then return end
     trainbot.enabled = false
     trainbot.key = 0
+    trainbot.brakeSample = nil
     trainbot.moveToken = trainbot.moveToken + 1
     trainbot.dissync = false
     setGameKeyState(16, 0)
     setGameKeyState(14, 0)
 end
 
+local function trainbotBrake()
+    setGameKeyState(16, 0)
+    setGameKeyState(14, 255)
+    writeMemory(0xB73458 + 0x1C, 1, 255, false)
+end
+
+local function trainbotAccelerate()
+    setGameKeyState(14, 0)
+    setGameKeyState(16, 255)
+    writeMemory(0xB73458 + 0x20, 1, 255, false)
+end
+
+-- Learns the real braking deceleration (m/s^2) while the brake is held.
+local function trainbotLearnDecel(braking, speedMs)
+    if not braking then
+        trainbot.brakeSample = nil
+        return
+    end
+    local nowTime = os.clock()
+    local sample = trainbot.brakeSample
+    if not sample then
+        trainbot.brakeSample = { t = nowTime, v = speedMs }
+    elseif nowTime - sample.t >= 0.5 then
+        local measured = (sample.v - speedMs) / (nowTime - sample.t)
+        if measured > 0.3 and speedMs > 1 then
+            trainbot.decel = clamp((trainbot.decel or 1.2) * 0.7 + measured * 0.3, 0.6, 8)
+        end
+        trainbot.brakeSample = { t = nowTime, v = speedMs }
+    end
+end
+
 function trainbot.update()
     if not trainbot.enabled then return end
     if not isCharInAnyTrain(PLAYER_PED) then
         trainbot.key = 0
+        trainbot.brakeSample = nil
         setGameKeyState(16, 0)
         setGameKeyState(14, 0)
         return
     end
 
     local car = storeCarCharIsInNoSave(PLAYER_PED)
-    local speed = getCarSpeed(car) * 3.67
+    local speedMs = getCarSpeed(car)
+    local speed = speedMs * TRAIN_KMH
     local x, y, z = getCharCoordinates(PLAYER_PED)
     local checkpoint = trainbot.checkpoint
-    local distance = math.max(0,
-        getDistanceBetweenCoords3d(x, y, z, checkpoint.position.x, checkpoint.position.y, checkpoint.position.z) - 1)
 
-    trainbot.timer = trainbot.timer or os.clock()
-    trainbot.lastDistance = trainbot.lastDistance or 1
+    local minSpeed, maxSpeed = trainbot.speed.min, trainbot.speed.max
+    local cruise = maxSpeed > 0 and (minSpeed + (maxSpeed - minSpeed) / 2) or 40
+    local speedLimit = maxSpeed > 0 and maxSpeed or (cruise + 10)
+    trainbot.decel = trainbot.decel or 1.2
 
-    if checkpoint.isFinish or (trainbot.distance - distance >= 0 and trainbot.distance - distance <= 35) then
-        if trainbot.timer < os.clock() then
-            trainbot.lastDistance = math.max(distance, 1)
-            trainbot.timer = os.clock() + 1
-        end
+    local braking, target, distance = false, cruise, -1
 
-        local desiredSpeed = trainbot.speed.min + (trainbot.speed.max - trainbot.speed.min) / 2
-        local stopDistance = distance - ((speed / 42) * math.max(trainbot.lastDistance, 1)) / 1.2
-        local brakeStartDistance = math.max(20, math.min(60, speed * 1.3 + 15))
-        local finalStopDistance = math.max(6, math.min(18, speed * 0.7 + 4))
-        local finalBrake = distance <= finalStopDistance
-            or (distance <= brakeStartDistance and speed <= desiredSpeed + 8)
+    -- Brake only for the station (finish) checkpoint. Regular route checkpoints are just driven through.
+    if checkpoint.active and checkpoint.isFinish then
+        distance = math.max(0, getDistanceBetweenCoords3d(
+            x, y, z, checkpoint.position.x, checkpoint.position.y, checkpoint.position.z) - 1)
 
-        printStringNow(string.format("%d/%d ; %d/%d/%d ; %d",
-            math.floor(speed), trainbot.speed.max, math.floor(trainbot.distance),
-            math.floor(distance), math.floor(trainbot.lastDistance), math.floor(stopDistance)), 250)
+        -- Speed profile: the highest speed from which we can still stop at the checkpoint.
+        local usable = math.max(0, distance - TRAIN_STOP_MARGIN)
+        local profile = math.sqrt(2 * trainbot.decel * 0.8 * usable) * TRAIN_KMH
+        target = math.min(cruise, profile, speedLimit)
+        if distance > 6 then target = math.max(target, math.min(TRAIN_MIN_CREEP, cruise)) end
+        if distance <= TRAIN_STOP_MARGIN then target = 0 end
 
-        if finalBrake then
+        if target <= 0 then
+            braking = true
+            trainbotBrake()
+            if distance < 6 and speed < 6 then setTrainSpeed(car, 0) end
+        elseif speed > target + 1.5 then
+            braking = true
+            trainbotBrake()
+        elseif speed < target - 3 then
+            trainbotAccelerate()
+        else
+            setGameKeyState(14, 0)
             setGameKeyState(16, 0)
-            setGameKeyState(14, 255)
-            writeMemory(0xB73458 + 0x1C, 1, 255, false)
-            if distance < 3 and speed < 5 then setTrainSpeed(car, 0) end
-        elseif stopDistance <= 1 and distance < 260 then
-            if distance < 3 and speed < 4 then
-                setTrainSpeed(car, math.max(0, getCarSpeed(car) / 1.1 - 1))
-            else
-                setGameKeyState(16, 0)
-                setGameKeyState(14, 255)
-                writeMemory(0xB73458 + 0x1C, 1, 255, false)
-            end
-        elseif speed < desiredSpeed then
-            setGameKeyState(16, 255)
-            writeMemory(0xB73458 + 0x20, 1, 255, false)
         end
-    elseif speed < trainbot.speed.min + (trainbot.speed.max - trainbot.speed.min) / 2 then
-        setGameKeyState(16, 255)
-        writeMemory(0xB73458 + 0x20, 1, 255, false)
+    else
+        if checkpoint.active then
+            distance = math.max(0, getDistanceBetweenCoords3d(
+                x, y, z, checkpoint.position.x, checkpoint.position.y, checkpoint.position.z) - 1)
+        end
+        if speed > speedLimit then
+            braking = true
+            trainbotBrake()
+        elseif speed < cruise then
+            trainbotAccelerate()
+        end
+    end
+
+    trainbotLearnDecel(braking, speedMs)
+
+    printStringNow(string.format("%d>%d ; %d ; a=%.1f", math.floor(speed), math.floor(target),
+        math.floor(distance), trainbot.decel), 250)
+
+    if trainbot.debug and os.clock() - (trainbot.debugTime or 0) >= 1 then
+        trainbot.debugTime = os.clock()
+        trainbotDebug("speed=%.1f target=%.1f dist=%.1f cp=%s finish=%s decel=%.2f brake=%s uiDist=%s",
+            speed, target, distance, tostring(checkpoint.active), tostring(checkpoint.isFinish),
+            trainbot.decel, tostring(braking), tostring(trainbot.distance))
     end
 
     local moveSpeed = getCarSpeed(car)
@@ -1302,13 +1363,25 @@ function trainbot.update()
     trainbot.key = moveDirection == 1 and 8 or (moveDirection == -1 and 32 or 0)
 end
 
-function trainbot.onSetRaceCheckpoint(checkpointType, position)
+function trainbot.setTarget(position, isFinish, kind)
     trainbot.checkpoint.position = position
-    trainbot.checkpoint.isFinish = checkpointType == 1
+    trainbot.checkpoint.isFinish = isFinish
+    trainbot.checkpoint.active = true
+    local x, y, z = getCharCoordinates(PLAYER_PED)
+    trainbotDebug("%s set: pos=%.1f %.1f %.1f finish=%s dist=%.1f",
+        kind or "checkpoint", position.x, position.y, position.z, tostring(isFinish),
+        getDistanceBetweenCoords3d(x, y, z, position.x, position.y, position.z))
+end
+
+function trainbot.onSetRaceCheckpoint(checkpointType, position)
+    trainbotDebug("race checkpoint type=%s", tostring(checkpointType))
+    trainbot.setTarget(position, checkpointType == 1, "race checkpoint")
 end
 
 function trainbot.onDisableRaceCheckpoint()
+    trainbotDebug("checkpoint disabled")
     trainbot.checkpoint.isFinish = false
+    trainbot.checkpoint.active = false
 end
 
 local function trainbotSendPosition(x, y, z)
@@ -1334,6 +1407,9 @@ local function trainbotSendPosition(x, y, z)
 end
 
 function trainbot.onSetCheckpoint(position)
+    if trainbot.enabled and isCharInAnyTrain(PLAYER_PED) then
+        trainbotDebug("regular checkpoint ignored: %.1f %.1f %.1f", position.x, position.y, position.z)
+    end
     if not trainbot.enabled or not isCharOnFoot(PLAYER_PED) then return end
 
     trainbot.moveToken = trainbot.moveToken + 1
@@ -1689,6 +1765,7 @@ local function toggleTrain()
         if truck.enabled then stopTrucking(true) end
         if stopOhota then stopOhota(true) end
         if svalka.stop then svalka.stop(true) end
+        if ezsim then ezsim.stop(true) end
         trainbot.start()
         pushLog(ru("Автопилот поезда запущен"), "success")
         Notifications.push("success", ru("Поезд"), ru("Автопилот включён"))
@@ -1716,6 +1793,7 @@ local function toggleOhota()
     if truck.enabled then stopTrucking(true) end
     if trainbot.enabled then trainbot.stop() end
     if svalka.stop then svalka.stop(true) end
+    if ezsim then ezsim.stop(true) end
     Ohota.enabled = true
     pushLog("\206\245\238\242\224 \231\224\239\243\249\229\237\224", "success")
     Notifications.push("success", "\206\245\238\242\224", "\204\238\228\243\235\252 \226\234\235\254\247\229\237")
@@ -1749,6 +1827,8 @@ function onReceivePacket(id, bs)
     if caseCatcher then
         caseCatcher.onPacket(id, bs)
     end
+    if shkola then shkola.onPacket(id, bs) end
+    if ezsim then ezsim.onPacket(id, bs) end
     if truck.enabled then
         if truckPacket(bs) == false then return false end
     end
@@ -2025,7 +2105,9 @@ local SB_X, SB_W = 10, 188
 local CONTENT_X = 214
 local TOP_H = 64
 
-local TAB_HOME, TAB_FISH, TAB_TRUCK, TAB_TRAIN, TAB_OHOTA, TAB_SVALKA, TAB_CASE, TAB_LOOK, TAB_SET = 1, 2, 3, 4, 5, 6, 7, 8, 9
+local TAB_HOME, TAB_FISH, TAB_TRUCK, TAB_TRAIN, TAB_OHOTA, TAB_SVALKA, TAB_CASE, TAB_LOOK, TAB_SET = 1, 2, 3, 4, 5, 6, 7, 10, 11
+TAB_SCHOOL = 8
+TAB_SIM = 9
 
 local Tabs = {
     { ru("Главная"), ru("Обзор модулей и управление"), 1 },
@@ -2041,6 +2123,8 @@ table.insert(Tabs, 4, trainTab)
 table.insert(Tabs, 5, { "\206\245\238\242\224", "\204\229\242\234\232, \239\240\232\246\229\235 \232 \243\242\232\235\232\242\251", 4 })
 table.insert(Tabs, 6, { ru("Свалка"), ru("Метки предметов на свалке"), 3 })
 table.insert(Tabs, 7, { ru("Кейсы"), ru("Автопокупка кейсов по таймеру"), 5 })
+table.insert(Tabs, 8, { ru("Школа Танцев"), ru("Автонажатие клавиш в танцах"), 5 })
+table.insert(Tabs, 9, { ru("SIM-карта"), ru("Перебор номеров телефона"), 5 })
 
 local State = {
     window = imgui.new.bool(false),
@@ -2167,6 +2251,269 @@ function caseCatcher.onPacket(id, bs)
     raknetBitStreamResetReadPointer(bs)
 end
 
+--================= Школа (автотанцы) =================--
+shkola = {
+    enabled = imgui.new.bool(false),
+    pressed = 0,
+    last = "",
+}
+
+shkola.keys = {
+    { pattern = "[0]", name = "W",     code = 87 },
+    { pattern = "[1]", name = "A",     code = 65 },
+    { pattern = "[2]", name = "S",     code = 83 },
+    { pattern = "[3]", name = "D",     code = 68 },
+    { pattern = "[4]", name = "SHIFT", code = 16 },
+    { pattern = "[5]", name = "SPACE", code = 32 },
+    { pattern = "[6]", name = "CTRL",  code = 17 },
+}
+
+function shkola.buildPacket(keyCode)
+    local data = { 215, 2, 0, 0, 0, 0, 0, 21, 0, 0, 0 }
+    for c in ("OnPlayerClientSideKey"):gmatch(".") do data[#data + 1] = c:byte() end
+    for _, b in ipairs({ 2, 0, 0, 0, 100, keyCode, 0, 0, 0 }) do data[#data + 1] = b end
+    return data
+end
+
+for _, key in ipairs(shkola.keys) do key.packet = shkola.buildPacket(key.code) end
+
+function shkola.toggle()
+    shkola.enabled[0] = not shkola.enabled[0]
+    pushLog(shkola.enabled[0] and ru("Школа запущена") or ru("Школа остановлена"), shkola.enabled[0] and "success" or "muted")
+    Notifications.push(shkola.enabled[0] and "success" or "info", ru("Школа"),
+        shkola.enabled[0] and ru("Автотанцы включены") or ru("Автотанцы выключены"))
+end
+
+function shkola.onPacket(id, bs)
+    if id ~= 215 or not shkola.enabled[0] then return end
+
+    local startOffset = raknetBitStreamGetReadOffset(bs)
+    local first
+    local ok, err = pcall(function()
+        if raknetBitStreamGetNumberOfUnreadBits(bs) < 24 then return end
+        raknetBitStreamIgnoreBits(bs, 8)
+        if raknetBitStreamReadInt16(bs) ~= 2 then return end
+        if raknetBitStreamGetNumberOfUnreadBits(bs) < 40 then return end
+
+        raknetBitStreamReadInt32(bs)
+        local count = raknetBitStreamReadInt8(bs)
+        if count <= 0 then return end
+
+        for n = 1, count do
+            if raknetBitStreamGetNumberOfUnreadBits(bs) < 32 then break end
+            local length = raknetBitStreamReadInt32(bs)
+            if length <= 0 or length > 65535 or length * 8 > raknetBitStreamGetNumberOfUnreadBits(bs) then break end
+            local str = raknetBitStreamReadString(bs, length)
+            if n == 1 then first = str end
+        end
+    end)
+    raknetBitStreamSetReadOffset(bs, startOffset)
+    if not ok then print("[Shkola] Packet parse failed: " .. tostring(err)) return end
+    if not first then return end
+
+    if first:find("interface") and first:find("DanceTrack") and first:find("showButton") then
+        for _, key in ipairs(shkola.keys) do
+            if first:find(key.pattern) then
+                sendBytes(key.packet)
+                shkola.pressed = shkola.pressed + 1
+                shkola.last = key.name
+                if S.chat[0] then sampAddChatMessage("{FF3B3B}[Школа] {FFFFFF}" .. ru("Нажата клавиша ") .. key.name, -1) end
+            end
+        end
+    end
+end
+
+--================= SIM-карта (перебор номеров) =================--
+ezsim = {
+    enabled = false,
+    index = 1,
+    nextAt = 0,
+    sent = 0,
+    last = "",
+    startDelay = 444,
+    interval = 794,
+}
+
+ezsim.numbers = {
+    111111, 222222, 333333, 444444, 555555, 666666, 777777, 888888, 999999, 100000,
+    200000, 300000, 400000, 500000, 600000, 700000, 800000, 900000, 333221, 100001,
+    200002, 300003, 400004, 500005, 600006, 700007, 800008, 900009, 123456, 654321,
+    543210, 202222, 220222, 222022, 222202, 222220, 303333, 330333, 333033, 333303,
+    333330, 404444, 440444, 444044, 444404, 444440, 505555, 550555, 555055, 555505,
+    555550, 606666, 660666, 666066, 666606, 666660, 707777, 770777, 777077, 777707,
+    777770, 808888, 880888, 888088, 888808, 888880, 909999, 990999, 999099, 999909,
+    999990, 101111, 110111, 111011, 111101, 111110, 212222, 221222, 222122, 222212,
+    222221, 313333, 331333, 333133, 333313, 333331, 414444, 441444, 444144, 444414,
+    444441, 515555, 551555, 555155, 555515, 555551, 616666, 661666, 666166, 666616,
+    666661, 717777, 771777, 777177, 777717, 777771, 818888, 881888, 888188, 888818,
+    888881, 919999, 991999, 999199, 999919, 999991, 323333, 332333, 333233, 333323,
+    333332, 424444, 442444, 444244, 444424, 444442, 525555, 552555, 555255, 555525,
+    555552, 626666, 662666, 666266, 666626, 666662, 727777, 772777, 777277, 777727,
+    777772, 828888, 882888, 888288, 888828, 888882, 929999, 992999, 999299, 999929,
+    999992, 121111, 112111, 111211, 111121, 111112, 232222, 223222, 222322, 222232,
+    222223, 434444, 443444, 444344, 444434, 444443, 535555, 553555, 555355, 555535,
+    555553, 636666, 663666, 666366, 666636, 666663, 737777, 773777, 777377, 777737,
+    777773, 838888, 883888, 888388, 888838, 888883, 939999, 993999, 999399, 999939,
+    999993, 131111, 113111, 111311, 111131, 111113, 242222, 224222, 222422, 222242,
+    222224, 343333, 334333, 333433, 333343, 333334, 545555, 554555, 555455, 555545,
+    555554, 646666, 664666, 666466, 666646, 666664, 747777, 774777, 777477, 777747,
+    777774, 848888, 884888, 888488, 888848, 888884, 949999, 994999, 999499, 999949,
+    999994, 141111, 114111, 111411, 111141, 111114, 252222, 225222, 222522, 222252,
+    222225, 353333, 335333, 333533, 333353, 333335, 454444, 445444, 444544, 444454,
+    444445, 656666, 665666, 666566, 666656, 666665, 757777, 775777, 777577, 777757,
+    777775, 858888, 885888, 888588, 888858, 888885, 959999, 995999, 999599, 999959,
+    999995, 151111, 115111, 111511, 111151, 111115, 262222, 226222, 222622, 222262,
+    222226, 363333, 336333, 333633, 333363, 333336, 464444, 446444, 444644, 444464,
+    444446, 565555, 556555, 555655, 555565, 555556, 767777, 776777, 777677, 777767,
+    777776, 868888, 886888, 888688, 888868, 888886, 969999, 996999, 999699, 999969,
+    999996, 161111, 116111, 111611, 111161, 111116, 272222, 227222, 222722, 222272,
+    222227, 373333, 337333, 333733, 333373, 333337, 474444, 447444, 444744, 444474,
+    444447, 575555, 557555, 555755, 555575, 555557, 676666, 667666, 666766, 666676,
+    666667, 878888, 887888, 888788, 888878, 888887, 979999, 997999, 999799, 999979,
+    999997, 171111, 117111, 111711, 111171, 111117, 282222, 228222, 222822, 222282,
+    222228, 383333, 338333, 333833, 333383, 333338, 484444, 448444, 444844, 444484,
+    444448, 585555, 558555, 555855, 555585, 555558, 686666, 668666, 666866, 666686,
+    666668, 787777, 778777, 777877, 777787, 777778, 989999, 998999, 999899, 999989,
+    999998, 181111, 118111, 111811, 111181, 111118, 292222, 229222, 222922, 222292,
+    222229, 393333, 339333, 333933, 333393, 333339, 494444, 449444, 444944, 444494,
+    444449, 595555, 559555, 555955, 555595, 555559, 696666, 669666, 666966, 666696,
+    666669, 797777, 779777, 777977, 777797, 777779, 898888, 889888, 888988, 888898,
+    888889, 191111, 119111, 111911, 111191, 111119, 110000, 120000, 130000, 140000,
+    150000, 160000, 170000, 180000, 190000, 210000, 220000, 230000, 240000, 250000,
+    260000, 270000, 280000, 290000, 310000, 320000, 330000, 340000, 350000, 360000,
+    370000, 380000, 390000, 410000, 420000, 430000, 440000, 450000, 460000, 470000,
+    480000, 490000, 510000, 520000, 530000, 540000, 550000, 560000, 570000, 580000,
+    590000, 610000, 620000, 630000, 640000, 650000, 660000, 670000, 680000, 690000,
+    710000, 720000, 730000, 740000, 750000, 760000, 770000, 780000, 790000, 810000,
+    820000, 830000, 840000, 850000, 860000, 870000, 880000, 890000, 910000, 920000,
+    930000, 940000, 950000, 960000, 970000, 980000, 990000, 221122, 331133, 441144,
+    551155, 661166, 771177, 881188, 991199, 112211, 332233, 442244, 552255, 662266,
+    772277, 882288, 992299, 113311, 223322, 443344, 553355, 663366, 773377, 883388,
+    993399, 114411, 224422, 334433, 554455, 664466, 774477, 884488, 994499, 115511,
+    225522, 335533, 445544, 665566, 775577, 885588, 995599, 116611, 226622, 336633,
+    446644, 556655, 776677, 886688, 996699, 117711, 227722, 337733, 447744, 557755,
+    667766, 887788, 997799, 118811, 228822, 338833, 448844, 558855, 668866, 778877,
+    998899, 119911, 229922, 339933, 449944, 559955, 669966, 779977, 889988, 111222,
+    111333, 111444, 111555, 111666, 111777, 111888, 111999, 222333, 222444, 222555,
+    222666, 222777, 222888, 222999, 333222, 333444, 333555, 333666, 333777, 333888,
+    333999, 444222, 444333, 444555, 444666, 444777, 444888, 444999, 555222, 555333,
+    555444, 555666, 555777, 555888, 555999, 666222, 666333, 666444, 666555, 666777,
+    666888, 666999, 777222, 777333, 777444, 777555, 777666, 777888, 777999, 888222,
+    888333, 888444, 888555, 888666, 888777, 888999, 999222, 999333, 999444, 999555,
+    999666, 999777, 999888, 221111, 331111, 441111, 551111, 661111, 771111, 881111,
+    991111, 332222, 442222, 552222, 662222, 772222, 882222, 992222, 223333, 443333,
+    553333, 663333, 773333, 883333, 993333, 224444, 334444, 554444, 664444, 774444,
+    884444, 994444, 225555, 335555, 445555, 665555, 775555, 885555, 995555, 226666,
+    336666, 446666, 556666, 776666, 886666, 996666, 227777, 337777, 447777, 557777,
+    667777, 887777, 997777, 228888, 338888, 448888, 558888, 668888, 778888, 998888,
+    229999, 339999, 449999, 559999, 669999, 779999, 889999
+}
+
+-- OnDialogResponse: button = 1, list = 1, text = number
+function ezsim.buildPacket(number)
+    local data = { 215, 2, 0, 0, 0, 0, 0, 16, 0, 0, 0 }
+    for c in ("OnDialogResponse"):gmatch(".") do data[#data + 1] = c:byte() end
+    for _, b in ipairs({ 8, 0, 0, 0, 100, 0, 0, 0, 0, 100, 1, 0, 0, 0, 100, 1, 0, 0, 0, 115, #number, 0, 0, 0 }) do
+        data[#data + 1] = b
+    end
+    for c in number:gmatch(".") do data[#data + 1] = c:byte() end
+    return data
+end
+
+function ezsim.start()
+    if ezsim.enabled then return end
+    if bot.on then stopBot(ru("Остановлено для запуска перебора номеров")) end
+    if truck.enabled then stopTrucking(true) end
+    if trainbot.enabled then trainbot.stop() end
+    if stopOhota then stopOhota(true) end
+    if svalka.stop then svalka.stop(true) end
+    ezsim.enabled = true
+    ezsim.index, ezsim.sent, ezsim.last = 1, 0, ""
+    ezsim.nextAt = getGameTimer() + ezsim.startDelay
+    pushLog(ru("Перебор номеров запущен"), "success")
+    Notifications.push("success", ru("SIM-карта"), ru("Перебор номеров включён"))
+end
+
+function ezsim.stop(silent)
+    if not ezsim.enabled then return end
+    ezsim.enabled = false
+    if not silent then
+        pushLog(ru("Перебор номеров остановлен"), "muted")
+        Notifications.push("info", ru("SIM-карта"), ru("Перебор номеров выключен"))
+    end
+end
+
+function ezsim.toggle()
+    if ezsim.enabled then ezsim.stop() else ezsim.start() end
+end
+
+function ezsim.update()
+    if not ezsim.enabled or getGameTimer() < ezsim.nextAt then return end
+    local number = tostring(ezsim.numbers[ezsim.index])
+    sendBytes(ezsim.buildPacket(number))
+    ezsim.nextAt = getGameTimer() + ezsim.interval
+    ezsim.index = ezsim.index % #ezsim.numbers + 1
+    ezsim.sent = ezsim.sent + 1
+    ezsim.last = number
+    if S.chat[0] then sampAddChatMessage("{FF3B3B}[SIM] {FFFFFF}" .. number, -1) end
+end
+
+function ezsim.isSuccess(str)
+    return str:find(ru("Номер телефона изменен"), 1, true) ~= nil
+        and str:find(ru("Теперь с Вами"), 1, true) ~= nil
+        and str:find(ru("можно связаться по номеру"), 1, true) ~= nil
+end
+
+function ezsim.onPacket(id, bs)
+    if id ~= 215 or not ezsim.enabled then return end
+
+    local startOffset = raknetBitStreamGetReadOffset(bs)
+    local success = false
+    local ok, err = pcall(function()
+        raknetBitStreamResetReadPointer(bs)
+        if raknetBitStreamGetNumberOfUnreadBits(bs) < 64 then return end
+        raknetBitStreamIgnoreBits(bs, 8)
+        if raknetBitStreamReadInt16(bs) ~= 2 then return end
+        raknetBitStreamReadInt32(bs)
+        for _ = 1, raknetBitStreamReadInt8(bs) do
+            if raknetBitStreamGetNumberOfUnreadBits(bs) < 32 then break end
+            local length = raknetBitStreamReadInt32(bs)
+            if length <= 0 or length > 65535 or length * 8 > raknetBitStreamGetNumberOfUnreadBits(bs) then break end
+            if ezsim.isSuccess(raknetBitStreamReadString(bs, length)) then
+                success = true
+                break
+            end
+        end
+    end)
+    raknetBitStreamSetReadOffset(bs, startOffset)
+    if not ok then print("[SIM] Packet parse failed: " .. tostring(err)) return end
+    if success then
+        ezsim.stop(true)
+        pushLog(ru("Номер телефона изменён"), "success")
+        Notifications.push("success", ru("SIM-карта"), ru("Номер телефона изменён"))
+        if S.chat[0] then sampAddChatMessage("{FF3B3B}[SIM] {FFFFFF}" .. ru("Номер изменён, перебор остановлен"), -1) end
+    end
+end
+
+function ezsim.render(w)
+    Ui.group(nil, {
+        { kind = "custom", h = 70, title = ru("Перебор номеров"),
+          desc = ezsim.enabled and ru("Работает") or ru("Выключен"), draw = function(x, y, wd, h)
+            imgui.SetCursorScreenPos(ImVec2(x + wd - 16 - 132, y + (h - 34) * 0.5))
+            if Ui.button("sim_toggle", ezsim.enabled and ru("Остановить") or ru("Запустить"), 132, 34,
+                ezsim.enabled and "danger" or "accent") then
+                ezsim.toggle()
+            end
+        end },
+    })
+
+    Ui.group(ru("Статистика"), {
+        { title = ru("Отправлено номеров"), desc = tostring(ezsim.sent) .. " (" .. ru("в списке ") .. #ezsim.numbers .. ")" },
+        { title = ru("Последний номер"), desc = ezsim.last ~= "" and ezsim.last or "-" },
+        { title = ru("Как пользоваться"), desc = ru("Откройте окно ввода номера и введите /ezsim") },
+    })
+end
+
 svalka.showPage = function()
     State.tab = TAB_SVALKA
     State.window[0] = true
@@ -2183,7 +2530,7 @@ local posItems = imgui.new["const char*"][#posNames](posNames)
 local function menuKeyCode() return keyCodes[S.menuKey[0] + 1] or 0x2D end
 
 local function runningModule()
-    if bot.on then return "fish" elseif truck.enabled then return "truck" elseif trainbot.enabled then return "train" elseif Ohota.enabled then return "hunt" elseif svalka.active[0] then return "svalka" elseif caseCatcher.enabled[0] then return "case" end
+    if bot.on then return "fish" elseif truck.enabled then return "truck" elseif trainbot.enabled then return "train" elseif Ohota.enabled then return "hunt" elseif svalka.active[0] then return "svalka" elseif caseCatcher.enabled[0] then return "case" elseif shkola.enabled[0] then return "school" elseif ezsim.enabled then return "sim" end
     return nil
 end
 
@@ -2193,6 +2540,8 @@ local function currentModule()
     if State.tab == TAB_OHOTA then return "hunt" end
     if State.tab == TAB_SVALKA then return "svalka" end
     if State.tab == TAB_CASE then return "case" end
+    if State.tab == TAB_SCHOOL then return "school" end
+    if State.tab == TAB_SIM then return "sim" end
     return "fish"
 end
 
@@ -2203,6 +2552,8 @@ local MODULE_NAMES = {
     hunt = "\206\245\238\242\224",
     svalka = ru("Свалка"),
     case = ru("Кейсы"),
+    school = ru("Школа"),
+    sim = ru("SIM-карта"),
 }
 
 local function resetSettings()
@@ -2268,6 +2619,14 @@ local function renderHome(w)
     Ui.moduleCard("m_case", ru("Кейсы"), ru("Автопокупка кейсов по таймеру"), 5, caseCatcher.enabled[0], caseStatus, w,
         function() caseCatcher.enabled[0] = not caseCatcher.enabled[0] end,
         function() State.tab = TAB_CASE end)
+
+    local schoolStatus = shkola.enabled[0] and (ru("Нажатий: ") .. shkola.pressed) or ru("Ожидает запуска")
+    Ui.moduleCard("m_school", ru("Школа"), ru("Автонажатие клавиш в танцах"), 5, shkola.enabled[0], schoolStatus, w,
+        shkola.toggle, function() State.tab = TAB_SCHOOL end)
+
+    local simStatus = ezsim.enabled and (ru("Отправлено: ") .. ezsim.sent) or ru("Ожидает запуска")
+    Ui.moduleCard("m_sim", ru("SIM-карта"), ru("Перебор номеров телефона"), 5, ezsim.enabled, simStatus, w,
+        ezsim.toggle, function() State.tab = TAB_SIM end)
 
     -- ����� ��� ������� ������
     local pp = imgui.GetCursorScreenPos()
@@ -2519,6 +2878,24 @@ local function renderCase(w)
     })
 end
 
+function shkola.render(w)
+    Ui.group(nil, {
+        { kind = "custom", h = 70, title = ru("Модуль школы"),
+          desc = shkola.enabled[0] and ru("Работает") or ru("Выключен"), draw = function(x, y, wd, h)
+            imgui.SetCursorScreenPos(ImVec2(x + wd - 16 - 132, y + (h - 34) * 0.5))
+            if Ui.button("school_toggle", shkola.enabled[0] and ru("Остановить") or ru("Запустить"), 132, 34,
+                shkola.enabled[0] and "danger" or "accent") then
+                shkola.toggle()
+            end
+        end },
+    })
+
+    Ui.group(ru("Статистика"), {
+        { title = ru("Нажато клавиш"), desc = tostring(shkola.pressed) },
+        { title = ru("Последняя клавиша"), desc = shkola.last ~= "" and shkola.last or "-" },
+    })
+end
+
 local function renderOhota(w)
     Ui.group(nil, {
         { kind = "custom", h = 70, title = "\204\238\228\243\235\252 \238\245\238\242\251",
@@ -2758,6 +3135,7 @@ local function renderScript(w)
         { title = "\206\245\238\242\224", desc = "/les - \238\242\234\240\251\242\252 \241\242\240\224\237\232\246\243, /ohota - \239\229\240\229\234\235\254\247\232\242\252 \236\238\228\243\235\252" },
         { title = ru("Свалка"), desc = ru("/") .. svalka.settings.cmd .. ru(" — страница, /") .. svalka.settings.cmdact .. ru(" — включить или выключить метки") },
         { title = ru("Кейсы"), desc = ru("/case — открыть страницу автопокупки кейсов") },
+        { title = ru("SIM-карта"), desc = ru("/ezsim — включить или выключить перебор номеров") },
     })
 
     Ui.group(ru("Обновления"), {
@@ -2879,29 +3257,32 @@ local function renderSidebar(winPos)
 
     -- ���������
     local navY = 78
+    local navAvail = (SB_X + H - SB_X * 2 - 174) - navY - 6
+    local rowH = math.max(22, math.min(32, math_floor(navAvail / math.max(#Tabs, 1))))
     for i, tab in ipairs(Tabs) do
-        imgui.SetCursorPos(ImVec2(SB_X + 10, navY + (i - 1) * 32))
-        imgui.InvisibleButton("##nav" .. i, ImVec2(SB_W - 20, 32))
+        imgui.SetCursorPos(ImVec2(SB_X + 10, navY + (i - 1) * rowH))
+        imgui.InvisibleButton("##nav" .. i, ImVec2(SB_W - 20, rowH))
         local hovered = imgui.IsItemHovered()
         if imgui.IsItemClicked() then State.tab = i end
         local mn = imgui.GetItemRectMin()
         local active = (i == State.tab)
-        local x1, y1, x2, y2 = mn.x, mn.y, mn.x + SB_W - 20, mn.y + 32
+        local x1, y1, x2, y2 = mn.x, mn.y, mn.x + SB_W - 20, mn.y + rowH
         if active then
             dl:AddRectFilledMultiColor(ImVec2(x1, y1), ImVec2(x2, y2),
                 u32(P.accent, 0.30), u32(P.accent, 0.06), u32(P.accent, 0.06), u32(P.accent, 0.30))
-            dl:AddRectFilled(ImVec2(x1, y1 + 7), ImVec2(x1 + 3, y2 - 7), u32(P.accent), 2)
+            dl:AddRectFilled(ImVec2(x1, y1 + (rowH - 16) * 0.5), ImVec2(x1 + 3, y2 - (rowH - 16) * 0.5), u32(P.accent), 2)
         elseif hovered then
             dl:AddRectFilled(ImVec2(x1, y1), ImVec2(x2, y2), u32(P.cardHi, 0.6), 10)
         end
         local col = active and P.text or (hovered and P.text or P.muted)
-        drawNavIcon(dl, tab[3], x1 + 24, y1 + 16, active and P.accent or col)
-        text(dl, x1 + 46, y1 + 7, u32(col), u8(tab[1]), Fonts.bold)
+        drawNavIcon(dl, tab[3], x1 + 24, y1 + rowH * 0.5, active and P.accent or col)
+        text(dl, x1 + 46, y1 + (rowH - 18) * 0.5, u32(col), u8(tab[1]), Fonts.bold)
         -- ��������� ����������� ������
         if (i == TAB_FISH and bot.on) or (i == TAB_TRUCK and truck.enabled)
             or (i == TAB_TRAIN and trainbot.enabled) or (i == TAB_OHOTA and Ohota.enabled)
-            or (i == TAB_SVALKA and svalka.active[0]) or (i == TAB_CASE and caseCatcher.enabled[0]) then
-            dl:AddCircleFilled(ImVec2(x2 - 14, y1 + 16), 3.5 + 0.8 * math_sin(now() * 4), u32(P.success), 12)
+            or (i == TAB_SVALKA and svalka.active[0]) or (i == TAB_CASE and caseCatcher.enabled[0]) or (i == TAB_SCHOOL and shkola.enabled[0])
+            or (i == TAB_SIM and ezsim.enabled) then
+            dl:AddCircleFilled(ImVec2(x2 - 14, y1 + rowH * 0.5), 3.5 + 0.8 * math_sin(now() * 4), u32(P.success), 12)
         end
     end
 
@@ -2927,13 +3308,19 @@ local function renderSidebar(winPos)
     else
         info = ru("Выберите модуль")
     end
+    if shown == "school" then info = ru("Автотанцы") end
+    if shown == "sim" then info = ru("Перебор номеров") end
     if shown == "train" then info = ru("Автопилот машиниста") end
     if shown == "hunt" then info = "\204\238\228\243\235\252 \238\245\238\242\251" end
     if running then text(dl, bx + 14, by + 54, u32(P.dim), u8(info), Fonts.smallBold) end
 
     imgui.SetCursorScreenPos(ImVec2(bx + 12, by + 74))
     if Ui.button("toggle", running and ru("Остановить") or ru("Запустить"), SB_W - 44, 40, running and "danger" or "accent") then
-        if running == "case" then caseCatcher.enabled[0] = false
+        if running == "sim" then ezsim.stop()
+        elseif cur == "sim" and not running then ezsim.start()
+        elseif running == "school" then shkola.enabled[0] = false
+        elseif cur == "school" and not running then shkola.enabled[0] = true
+        elseif running == "case" then caseCatcher.enabled[0] = false
         elseif cur == "case" and not running then caseCatcher.enabled[0] = true
         elseif running == "fish" then stopBot()
         elseif running == "truck" then stopTrucking()
@@ -3035,6 +3422,10 @@ local function renderMain()
         svalka.render(w)
     elseif State.tab == TAB_CASE then
         renderCase(w)
+    elseif State.tab == TAB_SCHOOL then
+        shkola.render(w)
+    elseif State.tab == TAB_SIM then
+        ezsim.render(w)
     else
         renderTrain(w)
     end
@@ -3137,6 +3528,9 @@ local function renderHud()
         text(dl, p.x + 32, p.y + 11, u32(P.text), u8(ru("Поезд")), Fonts.bold)
         text(dl, p.x + 104, p.y + 13, u32(P.muted),
             u8(trainbot.station ~= "" and trainbot.station or ru("Автопилот активен")), Fonts.smallBold)
+    elseif ezsim.enabled then
+        text(dl, p.x + 32, p.y + 11, u32(P.text), u8(ru("SIM-карта")), Fonts.bold)
+        text(dl, p.x + 104, p.y + 13, u32(P.muted), u8(ru("Отправлено: ") .. ezsim.sent), Fonts.smallBold)
     elseif svalka.active[0] then
         text(dl, p.x + 32, p.y + 11, u32(P.text), u8(ru("Свалка")), Fonts.bold)
         text(dl, p.x + 104, p.y + 13, u32(P.muted), u8(ru("Метки предметов включены")), Fonts.smallBold)
@@ -3167,7 +3561,7 @@ imgui.OnFrame(
 )
 
 imgui.OnFrame(
-    function() return S.hud[0] and (bot.on or truck.enabled or trainbot.enabled or Ohota.enabled or svalka.active[0]) and not isPauseMenuActive() end,
+    function() return S.hud[0] and (bot.on or truck.enabled or trainbot.enabled or Ohota.enabled or svalka.active[0] or ezsim.enabled) and not isPauseMenuActive() end,
     function(frame)
         frame.HideCursor = true
         renderHud()
@@ -3458,6 +3852,10 @@ function main()
         State.window[0] = true
     end)
     sampRegisterChatCommand("msh", toggleTrain)
+    sampRegisterChatCommand("trdebug", function()
+        trainbot.debug = not trainbot.debug
+        sampAddChatMessage("{FF3844}[TrainBot] {FFFFFF}debug: " .. tostring(trainbot.debug) .. " (moonloader.log)", -1)
+    end)
     sampRegisterChatCommand("train", function()
         State.tab = TAB_TRAIN
         State.window[0] = true
@@ -3471,6 +3869,8 @@ function main()
         State.tab = TAB_CASE
         State.window[0] = true
     end)
+    sampRegisterChatCommand("school", shkola.toggle)
+    sampRegisterChatCommand("ezsim", ezsim.toggle)
     if svalka.settings.cmd ~= "" then sampRegisterChatCommand(svalka.settings.cmd, svalka.showPage) end
     if svalka.settings.cmdact ~= "" then sampRegisterChatCommand(svalka.settings.cmdact, svalka.toggle) end
 
@@ -3533,6 +3933,7 @@ function main()
         end
 
         caseCatcher.update()
+        ezsim.update()
 
         if hotkeyAvailable() and isKeyDown(vkeys.VK_CONTROL) and wasKeyPressed(vkeys.VK_B) then
             State.tab = TAB_SVALKA
@@ -3549,6 +3950,8 @@ function onScriptTerminate(scr, quitGame)
         trainbot.stop()
         Ohota.autoYClicker:Stop()
         Ohota.enabled = false
+        if shkola then shkola.enabled[0] = false end
+        if ezsim then ezsim.enabled = false end
         if dirty then save_config() end
         if ohotaDirty then saveOhotaConfig() end
         if svalka.saveTime then svalka.saveConfig() end
