@@ -1,7 +1,7 @@
 script_name("SofterRadmira Hub")
-script_description("SofterRadmira Hub: fishing, trucking, train, hunting, and Svalka")
+script_description("SofterRadmira Hub: fishing, trucking, train, hunting, Svalka, and metal detector")
 script_author("SofterRadmira")
-script_version("5.2.5")
+script_version("5.2.6")
 
 local imgui    = require("mimgui")
 local encoding = require("encoding")
@@ -307,10 +307,10 @@ local ImVec2 = imgui.ImVec2
 local ImVec4 = imgui.ImVec4
 local Cond   = imgui.Cond
 
-local VERSION  = "5.2.5"
+local VERSION  = "5.2.6"
 local INI_NAME = "SofterRadmiraFish_red.ini"
 
---================= ��������� =================--
+--================= =================--
 local DEFAULTS = {
     Opacity = 0.97,
     AccentR = 0.92, AccentG = 0.16, AccentB = 0.22,
@@ -332,6 +332,7 @@ local DEFAULTS = {
     TelegramToken = "",
     TelegramDisconnect = true,
     TelegramAdmin = true,
+    MetFound = 93, MetSearchTime = 90, MetHold = 1.3,
 }
 
 local config = inicfg.load({ Settings = DEFAULTS }, INI_NAME)
@@ -465,6 +466,9 @@ local S = {
     telegramToken = imgui.new.char[128](tostring(cs.TelegramToken)),
     telegramDisconnect = imgui.new.bool(cs.TelegramDisconnect),
     telegramAdmin = imgui.new.bool(cs.TelegramAdmin),
+    metFound = imgui.new.int(tonumber(cs.MetFound) or 93),
+    metTime = imgui.new.int(tonumber(cs.MetSearchTime) or 90),
+    metHold = imgui.new.float(tonumber(cs.MetHold) or 1.3),
 }
 
 local dirty, lastSave = false, 0
@@ -493,6 +497,7 @@ local function save_config()
     cs.TelegramToken = ffi.string(S.telegramToken)
     cs.TelegramDisconnect = S.telegramDisconnect[0]
     cs.TelegramAdmin = S.telegramAdmin[0]
+    cs.MetFound, cs.MetSearchTime, cs.MetHold = S.metFound[0], S.metTime[0], S.metHold[0]
     inicfg.save(config, INI_NAME)
     dirty = false
     lastSave = os.clock()
@@ -899,6 +904,7 @@ local function startBot()
     if stopOhota then stopOhota(true) end
     if svalka.stop then svalka.stop(true) end
     if ezsim then ezsim.stop(true) end
+    if metsearch then metsearch.stop(true) end
     bot.on = true
     bot.startedAt = os.time()
     fishRestart()
@@ -932,6 +938,7 @@ svalka.start = function()
     if trainbot.enabled then trainbot.stop() end
     if stopOhota then stopOhota(true) end
     if ezsim then ezsim.stop(true) end
+    if metsearch then metsearch.stop(true) end
     svalka.active[0] = true
     pushLog(ru("Поиск предметов на свалке запущен"), "success")
     Notifications.push("success", ru("Свалка"), ru("Метки предметов включены"))
@@ -1155,6 +1162,7 @@ local function startTrucking()
     if stopOhota then stopOhota(true) end
     if svalka.stop then svalka.stop(true) end
     if ezsim then ezsim.stop(true) end
+    if metsearch then metsearch.stop(true) end
     truck.enabled = true
     truck.last = ""
     pushLog(ru("Дальнобойщик: поиск заказа"), "success")
@@ -1766,6 +1774,7 @@ local function toggleTrain()
         if stopOhota then stopOhota(true) end
         if svalka.stop then svalka.stop(true) end
         if ezsim then ezsim.stop(true) end
+        if metsearch then metsearch.stop(true) end
         trainbot.start()
         pushLog(ru("Автопилот поезда запущен"), "success")
         Notifications.push("success", ru("Поезд"), ru("Автопилот включён"))
@@ -1794,6 +1803,7 @@ local function toggleOhota()
     if trainbot.enabled then trainbot.stop() end
     if svalka.stop then svalka.stop(true) end
     if ezsim then ezsim.stop(true) end
+    if metsearch then metsearch.stop(true) end
     Ohota.enabled = true
     pushLog("\206\245\238\242\224 \231\224\239\243\249\229\237\224", "success")
     Notifications.push("success", "\206\245\238\242\224", "\204\238\228\243\235\252 \226\234\235\254\247\229\237")
@@ -1829,6 +1839,7 @@ function onReceivePacket(id, bs)
     end
     if shkola then shkola.onPacket(id, bs) end
     if ezsim then ezsim.onPacket(id, bs) end
+    if metsearch then metsearch.onPacket(id, bs) end
     if truck.enabled then
         if truckPacket(bs) == false then return false end
     end
@@ -1841,6 +1852,7 @@ end
 
 function ev.onServerMessage(color, text)
     if S.telegram then S.telegram.onServerMessage(text) end
+    if metsearch then metsearch.onServerMessage(color, text) end
 end
 
 --================= ������ =================--
@@ -1886,6 +1898,57 @@ local function drawNavIcon(dl, kind, cx, cy, col)
         dl:AddRect(ImVec2(cx + 1, cy - 2), ImVec2(cx + 9, cy + 3), c, 1, nil, 1.5)
         dl:AddCircleFilled(ImVec2(cx - 5, cy + 5), 2.2, c, 10)
         dl:AddCircleFilled(ImVec2(cx + 5, cy + 5), 2.2, c, 10)
+    elseif kind == 6 then -- SIM-карта
+        dl:AddRect(ImVec2(cx - 7, cy - 9), ImVec2(cx + 7, cy + 9), c, 2, nil, 1.5)
+        dl:AddLine(ImVec2(cx + 2, cy - 9), ImVec2(cx + 7, cy - 4), c, 1.5)
+        dl:AddRect(ImVec2(cx - 3.5, cy - 2), ImVec2(cx + 3.5, cy + 5), c, 1, nil, 1.5)
+        dl:AddLine(ImVec2(cx - 3.5, cy + 1.5), ImVec2(cx + 3.5, cy + 1.5), c, 1)
+    elseif kind == 7 then -- кейс
+        dl:AddRect(ImVec2(cx - 9, cy - 4), ImVec2(cx + 9, cy + 8), c, 2, nil, 1.5)
+        dl:AddRect(ImVec2(cx - 4, cy - 8), ImVec2(cx + 4, cy - 4), c, 1, nil, 1.5)
+        dl:AddLine(ImVec2(cx - 9, cy + 1), ImVec2(cx + 9, cy + 1), c, 1.5)
+        dl:AddRectFilled(ImVec2(cx - 1.5, cy - 0.5), ImVec2(cx + 1.5, cy + 3), c, 1)
+    elseif kind == 8 then -- танцы (нота)
+        dl:AddCircleFilled(ImVec2(cx - 4, cy + 6), 3.2, c, 12)
+        dl:AddCircleFilled(ImVec2(cx + 5, cy + 4), 3.2, c, 12)
+        dl:AddLine(ImVec2(cx - 1, cy + 6), ImVec2(cx - 1, cy - 8), c, 1.5)
+        dl:AddLine(ImVec2(cx + 8, cy + 4), ImVec2(cx + 8, cy - 10), c, 1.5)
+        dl:AddLine(ImVec2(cx - 1, cy - 8), ImVec2(cx + 8, cy - 10), c, 2)
+    elseif kind == 9 then -- металлоискатель
+        dl:AddCircle(ImVec2(cx - 4, cy + 6), 4.5, c, 14, 1.5)
+        dl:AddCircle(ImVec2(cx - 4, cy + 6), 1.5, c, 8, 1.2)
+        dl:AddLine(ImVec2(cx - 1, cy + 3), ImVec2(cx + 7, cy - 8), c, 1.5)
+        dl:AddLine(ImVec2(cx + 4, cy - 9), ImVec2(cx + 10, cy - 5), c, 1.5)
+    elseif kind == 10 then -- прицел (охота)
+        dl:AddCircle(ImVec2(cx, cy), 6.5, c, 18, 1.5)
+        dl:AddLine(ImVec2(cx - 10, cy), ImVec2(cx - 3, cy), c, 1.5)
+        dl:AddLine(ImVec2(cx + 3, cy), ImVec2(cx + 10, cy), c, 1.5)
+        dl:AddLine(ImVec2(cx, cy - 10), ImVec2(cx, cy - 3), c, 1.5)
+        dl:AddLine(ImVec2(cx, cy + 3), ImVec2(cx, cy + 10), c, 1.5)
+        dl:AddCircleFilled(ImVec2(cx, cy), 1.3, c, 6)
+    elseif kind == 11 then -- поезд
+        dl:AddRect(ImVec2(cx - 7, cy - 9), ImVec2(cx + 7, cy + 5), c, 3, nil, 1.5)
+        dl:AddRect(ImVec2(cx - 4, cy - 6), ImVec2(cx + 4, cy - 1), c, 1, nil, 1.5)
+        dl:AddCircleFilled(ImVec2(cx - 3.5, cy + 2), 1.1, c, 6)
+        dl:AddCircleFilled(ImVec2(cx + 3.5, cy + 2), 1.1, c, 6)
+        dl:AddLine(ImVec2(cx - 5, cy + 5), ImVec2(cx - 8, cy + 10), c, 1.5)
+        dl:AddLine(ImVec2(cx + 5, cy + 5), ImVec2(cx + 8, cy + 10), c, 1.5)
+    elseif kind == 12 then -- мусорный бак (свалка)
+        dl:AddLine(ImVec2(cx - 9, cy - 5), ImVec2(cx + 9, cy - 5), c, 1.5)
+        dl:AddRect(ImVec2(cx - 3, cy - 9), ImVec2(cx + 3, cy - 5), c, 1, nil, 1.5)
+        dl:AddLine(ImVec2(cx - 6.5, cy - 5), ImVec2(cx - 5.5, cy + 9), c, 1.5)
+        dl:AddLine(ImVec2(cx + 6.5, cy - 5), ImVec2(cx + 5.5, cy + 9), c, 1.5)
+        dl:AddLine(ImVec2(cx - 5.5, cy + 9), ImVec2(cx + 5.5, cy + 9), c, 1.5)
+        dl:AddLine(ImVec2(cx - 2, cy - 2), ImVec2(cx - 2, cy + 6), c, 1.2)
+        dl:AddLine(ImVec2(cx + 2, cy - 2), ImVec2(cx + 2, cy + 6), c, 1.2)
+    elseif kind == 14 then -- шестерёнка (настройки)
+        dl:AddCircle(ImVec2(cx, cy), 6, c, 18, 1.5)
+        dl:AddCircleFilled(ImVec2(cx, cy), 2, c, 8)
+        for i = 0, 7 do
+            local a = i * math.pi / 4
+            dl:AddLine(ImVec2(cx + math_cos(a) * 6, cy + math_sin(a) * 6),
+                ImVec2(cx + math_cos(a) * 9.5, cy + math_sin(a) * 9.5), c, 2.2)
+        end
     else
         dl:AddCircle(ImVec2(cx, cy), 7, c, 16, 2.5)
         dl:AddCircleFilled(ImVec2(cx, cy), 2.2, c, 8)
@@ -2105,9 +2168,10 @@ local SB_X, SB_W = 10, 188
 local CONTENT_X = 214
 local TOP_H = 64
 
-local TAB_HOME, TAB_FISH, TAB_TRUCK, TAB_TRAIN, TAB_OHOTA, TAB_SVALKA, TAB_CASE, TAB_LOOK, TAB_SET = 1, 2, 3, 4, 5, 6, 7, 10, 11
+local TAB_HOME, TAB_FISH, TAB_TRUCK, TAB_TRAIN, TAB_OHOTA, TAB_SVALKA, TAB_CASE, TAB_LOOK, TAB_SET = 1, 2, 3, 4, 5, 6, 7, 11, 12
 TAB_SCHOOL = 8
 TAB_SIM = 9
+TAB_MET = 10
 
 local Tabs = {
     { ru("Главная"), ru("Обзор модулей и управление"), 1 },
@@ -2125,6 +2189,15 @@ table.insert(Tabs, 6, { ru("Свалка"), ru("Метки предметов н
 table.insert(Tabs, 7, { ru("Кейсы"), ru("Автопокупка кейсов по таймеру"), 5 })
 table.insert(Tabs, 8, { ru("Школа Танцев"), ru("Автонажатие клавиш в танцах"), 5 })
 table.insert(Tabs, 9, { ru("SIM-карта"), ru("Перебор номеров телефона"), 5 })
+table.insert(Tabs, 10, { ru("Металлопоиск"), ru("Автопоиск и раскопка кладов"), 4 })
+Tabs[TAB_TRAIN][3] = 11
+Tabs[TAB_OHOTA][3] = 10
+Tabs[TAB_SVALKA][3] = 12
+Tabs[TAB_CASE][3] = 7
+Tabs[TAB_SCHOOL][3] = 8
+Tabs[TAB_SIM][3] = 6
+Tabs[TAB_MET][3] = 9
+Tabs[TAB_SET][3] = 14
 
 local State = {
     window = imgui.new.bool(false),
@@ -2427,6 +2500,7 @@ function ezsim.start()
     if trainbot.enabled then trainbot.stop() end
     if stopOhota then stopOhota(true) end
     if svalka.stop then svalka.stop(true) end
+    if metsearch then metsearch.stop(true) end
     ezsim.enabled = true
     ezsim.index, ezsim.sent, ezsim.last = 1, 0, ""
     ezsim.nextAt = getGameTimer() + ezsim.startDelay
@@ -2514,6 +2588,459 @@ function ezsim.render(w)
     })
 end
 
+--================= Металлоискатель =================--
+-- Глобальная таблица (как ezsim): в основном чанке почти исчерпан лимит локальных переменных.
+metsearch = {
+    enabled = false,
+    token = 0,           -- поколение потока: старый поток сам завершается после stop/start
+    digging = false,
+    state = "",
+    points = {},         -- углы зоны, отмечаются командой /metp
+    samples = {},        -- замеры {x, y, s, t}, пишутся в момент прихода пакета
+    signal = 0,          -- последнее ненулевое показание прибора
+    lastSignalTime = 0,
+    dug = 0,
+    debug = false,
+    BASE = 113.5,        -- по логу: сигнал = 113.5 - 16.6 * расстояние (м)
+    PER_M = 16.6,
+}
+
+function metsearch.chat(str, force)
+    if force or S.chat[0] then
+        sampAddChatMessage("{FF3B3B}" .. ru("[Металлоискатель]") .. " {FFFFFF}" .. str, -1)
+    end
+end
+
+function metsearch.log(str)
+    if not metsearch.debug then return end
+    local f = io.open(getWorkingDirectory() .. "\\metbot.txt", "a")
+    if f then
+        f:write(string.format("%.2f;%s\n", os.clock(), str))
+        f:close()
+    end
+end
+
+-- текущий сигнал с учётом устаревания: нули между тиками игнорируются
+function metsearch.sig()
+    if os.clock() - metsearch.lastSignalTime > S.metHold[0] then return 0 end
+    return metsearch.signal
+end
+
+function metsearch.alive(tok)
+    return metsearch.enabled and metsearch.token == tok
+end
+
+function metsearch.resetSignal()
+    metsearch.signal, metsearch.lastSignalTime, metsearch.samples = 0, 0, {}
+end
+
+function metsearch.inZone(x, y)
+    local pts = metsearch.points
+    local inside = false
+    local j = #pts
+    for i = 1, #pts do
+        local a, b = pts[i], pts[j]
+        if (a.y > y) ~= (b.y > y) and x < (b.x - a.x) * (y - a.y) / (b.y - a.y) + a.x then
+            inside = not inside
+        end
+        j = i
+    end
+    return inside
+end
+
+function metsearch.randomPoint()
+    local pts = metsearch.points
+    if #pts < 3 then return end
+    local minX, maxX, minY, maxY = pts[1].x, pts[1].x, pts[1].y, pts[1].y
+    for _, p in ipairs(pts) do
+        minX, maxX = math.min(minX, p.x), math.max(maxX, p.x)
+        minY, maxY = math.min(minY, p.y), math.max(maxY, p.y)
+    end
+    for _ = 1, 200 do
+        local x = minX + math.random() * (maxX - minX)
+        local y = minY + math.random() * (maxY - minY)
+        if metsearch.inZone(x, y) then return x, y end
+    end
+end
+
+function metsearch.addPoint()
+    local x, y = getCharCoordinates(PLAYER_PED)
+    table.insert(metsearch.points, { x = x, y = y })
+    metsearch.chat(string.format(ru("Угол %d отмечен"), #metsearch.points), true)
+end
+
+function metsearch.clear()
+    metsearch.stop(true)
+    metsearch.points = {}
+    metsearch.chat(ru("Зона сброшена"), true)
+end
+
+function metsearch.toggleDebug()
+    metsearch.debug = not metsearch.debug
+    metsearch.chat("debug: " .. tostring(metsearch.debug) .. " (metbot.txt)", true)
+end
+
+-- пакет 215: getSearchInfo('[1,N,..]'), N - показание; [0,0,..] - пустые тики
+function metsearch.onPacket(id, bs)
+    if id ~= 215 or not metsearch.enabled then return end
+    local startOffset = raknetBitStreamGetReadOffset(bs)
+    local signal
+    local ok, err = pcall(function()
+        raknetBitStreamResetReadPointer(bs)
+        if raknetBitStreamGetNumberOfUnreadBits(bs) < 64 then return end
+        raknetBitStreamIgnoreBits(bs, 8)
+        if raknetBitStreamReadInt16(bs) ~= 2 then return end
+        raknetBitStreamReadInt32(bs)
+        local count = raknetBitStreamReadInt8(bs)
+        if count < 1 then return end
+        if raknetBitStreamGetNumberOfUnreadBits(bs) < 32 then return end
+        local length = raknetBitStreamReadInt32(bs)
+        if length <= 0 or length > 65535 or length * 8 > raknetBitStreamGetNumberOfUnreadBits(bs) then return end
+        local str = raknetBitStreamReadString(bs, length)
+        if str:find("GarbageMetalSearch", 1, true) and str:find("getSearchInfo", 1, true) then
+            local raw = str:match("getSearchInfo%('(.*)'%)")
+            local data = raw and decodeJson(raw)
+            if type(data) == "table" then signal = tonumber(data[2]) or 0 end
+        end
+    end)
+    raknetBitStreamSetReadOffset(bs, startOffset)
+    if not ok then print("[Metal detector] Packet parse failed: " .. tostring(err)) return end
+    -- ноль не затирает сигнал: прибор чередует [1,N,..] и [0,0,..]
+    if signal and signal > 0 then
+        metsearch.signal = signal
+        metsearch.lastSignalTime = os.clock()
+        local x, y = getCharCoordinates(PLAYER_PED)
+        local samples = metsearch.samples
+        samples[#samples + 1] = { x = x, y = y, s = signal, t = os.clock() }
+        if #samples > 40 then table.remove(samples, 1) end
+    end
+end
+
+function metsearch.onServerMessage(color, msg)
+    if not metsearch.enabled or type(msg) ~= "string" then return end
+    if msg:find(ru("Вы откопали"), 1, true) then
+        metsearch.dug = metsearch.dug + 1
+        metsearch.digging = false
+    elseif msg:find(ru("Вы ничего не нашли"), 1, true) then
+        metsearch.digging = false
+    end
+end
+
+function metsearch.stopWalk()
+    setGameKeyState(1, 0)
+    setVirtualKeyDown(18, false)
+end
+
+function metsearch.stepTo(posX, posY)
+    local x, y = getCharCoordinates(PLAYER_PED)
+    local angle = getHeadingFromVector2d(posX - x, posY - y)
+    setCameraPositionUnfixed(0.2, math.rad(angle - 90))
+    setVirtualKeyDown(18, true)
+    setGameKeyState(1, -255)
+end
+
+-- обход зоны, пока нет сигнала
+function metsearch.patrol(tok)
+    local posX, posY = metsearch.randomPoint()
+    if not posX then
+        metsearch.chat(ru("Не удалось выбрать точку внутри зоны, проверьте углы"), true)
+        metsearch.stop()
+        return
+    end
+    local start = os.clock()
+    while metsearch.alive(tok) and metsearch.sig() == 0 do
+        local x, y = getCharCoordinates(PLAYER_PED)
+        if getDistanceBetweenCoords2d(x, y, posX, posY) < 1.0 then break end
+        if os.clock() - start > 30 then break end
+        metsearch.stepTo(posX, posY)
+        wait(0)
+    end
+    if metsearch.alive(tok) then metsearch.stopWalk() end
+end
+
+-- идём к точке, замеры пишутся по ходу движения (в onPacket)
+function metsearch.walkTo(tok, posX, posY, allowOutside)
+    local sx, sy = getCharCoordinates(PLAYER_PED)
+    if not allowOutside and not metsearch.inZone(posX, posY) then
+        metsearch.log(string.format("outside zone;target %.2f %.2f;at %.2f %.2f", posX, posY, sx, sy))
+        return false
+    end
+    local start = os.clock()
+    while metsearch.alive(tok) and metsearch.sig() < S.metFound[0] and os.clock() - start < 8 do
+        local x, y = getCharCoordinates(PLAYER_PED)
+        if getDistanceBetweenCoords2d(x, y, posX, posY) < 0.3 then break end
+        metsearch.stepTo(posX, posY)
+        wait(0)
+    end
+    if metsearch.alive(tok) then metsearch.stopWalk() end
+    local ex, ey = getCharCoordinates(PLAYER_PED)
+    metsearch.log(string.format("start %.2f %.2f;target %.2f %.2f;end %.2f %.2f;time %.1f;signal %d",
+        sx, sy, posX, posY, ex, ey, os.clock() - start, metsearch.sig()))
+    return true
+end
+
+function metsearch.bestSample()
+    local best
+    for _, p in ipairs(metsearch.samples) do
+        if not best or p.s > best.s then best = p end
+    end
+    return best
+end
+
+-- точка, лучше всего совпадающая с замерами (последние замеры + лучший)
+function metsearch.estimate(best)
+    local samples = metsearch.samples
+    local BASE, PER_M = metsearch.BASE, metsearch.PER_M
+    local sqrt, max = math.sqrt, math.max
+    local used = { best }
+    for i = math.max(1, #samples - 14), #samples do used[#used + 1] = samples[i] end
+    local R = (BASE - best.s) / PER_M + 1.0
+    local resX, resY, resErr = best.x, best.y, math.huge
+    for gx = best.x - R, best.x + R, 0.15 do
+        for gy = best.y - R, best.y + R, 0.15 do
+            local err = 0
+            for _, p in ipairs(used) do
+                local dx, dy = gx - p.x, gy - p.y
+                local e = p.s - max(0, BASE - PER_M * sqrt(dx * dx + dy * dy))
+                err = err + e * e
+            end
+            if err < resErr then resX, resY, resErr = gx, gy, err end
+        end
+    end
+    return resX, resY
+end
+
+function metsearch.searchSignal(tok)
+    local probes = { {2, 0}, {0, 2}, {-2, 0}, {0, -2} }
+    local probe = 1
+    local startT = os.clock()
+    local attempt, stall, lost = 0, 0, 0
+    local lastBestS = 0
+    local spiralAng, spiralR = 0, 1.0
+
+    while metsearch.alive(tok) and os.clock() - startT < S.metTime[0] do
+        wait(0) -- защита от бесконечного цикла без yield
+        if not metsearch.alive(tok) then return end
+        attempt = attempt + 1
+        if metsearch.sig() >= S.metFound[0] then return end
+        local best = metsearch.bestSample()
+        if not best then return end
+
+        if metsearch.sig() == 0 then
+            -- сигнал пропал: возвращаемся к лучшему замеру, а не сдаёмся
+            lost = lost + 1
+            if lost > 6 then break end
+            metsearch.walkTo(tok, best.x, best.y, true)
+            wait(200)
+        else
+            lost = 0
+            -- застой: лучший замер давно не растёт
+            if best.s > lastBestS then stall = 0; lastBestS = best.s else stall = stall + 1 end
+
+            local x, y = getCharCoordinates(PLAYER_PED)
+            local posX, posY
+            if #metsearch.samples < 3 then
+                local pr = probes[probe]
+                probe = probe % #probes + 1
+                posX, posY = best.x + pr[1], best.y + pr[2]
+            elseif stall >= 5 then
+                -- спираль вокруг лучшей точки с растущим радиусом
+                spiralAng = spiralAng + math.rad(60)
+                if spiralAng >= math.rad(360) then spiralAng = 0; spiralR = math.min(spiralR + 0.7, 4.0) end
+                posX, posY = best.x + math.cos(spiralAng) * spiralR, best.y + math.sin(spiralAng) * spiralR
+                if stall >= 12 then stall = 0 end
+            else
+                posX, posY = metsearch.estimate(best)
+                if getDistanceBetweenCoords2d(x, y, posX, posY) < 0.5 then
+                    local ang = math.rad(attempt * 90)
+                    posX, posY = posX + math.cos(ang) * 0.7, posY + math.sin(ang) * 0.7
+                end
+            end
+            -- у края зоны искать можно чуть за границей, место может быть рядом
+            metsearch.walkTo(tok, posX, posY, true)
+        end
+    end
+    if not metsearch.alive(tok) then return end
+    metsearch.chat(ru("Не удалось найти точку, иду дальше"))
+    metsearch.resetSignal()
+    local posX, posY = metsearch.randomPoint()
+    if posX then metsearch.walkTo(tok, posX, posY) end
+end
+
+function metsearch.dig(tok)
+    metsearch.digging = true
+    metsearch.stopWalk()
+    metsearch.chat(ru("Место найдено, копаю"))
+    setCurrentCharWeapon(PLAYER_PED, 6)
+    wait(500)
+    setVirtualKeyDown(67, true)
+    wait(100)
+    setVirtualKeyDown(67, false)
+    local start = os.clock()
+    while metsearch.digging and metsearch.alive(tok) and os.clock() - start < 20 do wait(100) end
+    metsearch.digging = false
+    metsearch.resetSignal()
+    setCurrentCharWeapon(PLAYER_PED, 0)
+    wait(1500)
+end
+
+function metsearch.run(tok)
+    local ok, err = pcall(function()
+        while metsearch.alive(tok) do
+            wait(0)
+            if not metsearch.alive(tok) then break end
+            local s = metsearch.sig()
+            if s >= S.metFound[0] then
+                metsearch.state = "dig"
+                metsearch.dig(tok)
+            elseif s > 0 then
+                metsearch.state = "search"
+                metsearch.searchSignal(tok)
+            else
+                metsearch.state = "patrol"
+                metsearch.samples = {}
+                metsearch.patrol(tok)
+            end
+        end
+    end)
+    if not ok then
+        print("[SofterRadmira Hub] Metal detector error: " .. tostring(err))
+        if metsearch.token == tok then
+            metsearch.stop(true)
+            pushLog(ru("Металлоискатель: ошибка, модуль остановлен"), "muted")
+            Notifications.push("danger", ru("Металлоискатель"), ru("Ошибка, модуль остановлен"))
+        end
+    end
+end
+
+function metsearch.start()
+    if metsearch.enabled then return end
+    if #metsearch.points < 3 then
+        metsearch.chat(ru("Сначала отметьте минимум 3 угла зоны командой /metp"), true)
+        Notifications.push("warning", ru("Металлоискатель"), ru("Отметьте минимум 3 угла зоны"))
+        return
+    end
+    local x, y = getCharCoordinates(PLAYER_PED)
+    if not metsearch.inZone(x, y) then
+        metsearch.chat(ru("Вы вне отмеченной зоны"), true)
+        Notifications.push("warning", ru("Металлоискатель"), ru("Вы вне отмеченной зоны"))
+        return
+    end
+    if bot.on then stopBot(ru("Остановлено для запуска металлоискателя")) end
+    if truck.enabled then stopTrucking(true) end
+    if trainbot.enabled then trainbot.stop() end
+    if stopOhota then stopOhota(true) end
+    if svalka.stop then svalka.stop(true) end
+    if ezsim then ezsim.stop(true) end
+    metsearch.resetSignal()
+    metsearch.digging = false
+    metsearch.dug = 0
+    metsearch.state = "patrol"
+    metsearch.enabled = true
+    metsearch.token = metsearch.token + 1
+    local tok = metsearch.token
+    pushLog(ru("Металлоискатель запущен"), "success")
+    Notifications.push("success", ru("Металлоискатель"), ru("Поиск кладов включён"))
+    metsearch.chat("{00FF00}" .. ru("Активирован"))
+    lua_thread.create(function() metsearch.run(tok) end)
+end
+
+function metsearch.stop(silent)
+    if not metsearch.enabled then return end
+    metsearch.enabled = false
+    metsearch.token = metsearch.token + 1
+    metsearch.digging = false
+    metsearch.state = ""
+    metsearch.resetSignal()
+    metsearch.stopWalk()
+    if not silent then
+        pushLog(ru("Металлоискатель остановлен"), "muted")
+        Notifications.push("info", ru("Металлоискатель"), ru("Поиск кладов выключен"))
+        metsearch.chat("{FF0000}" .. ru("Деактивирован"))
+    end
+end
+
+function metsearch.toggle()
+    if metsearch.enabled then metsearch.stop() else metsearch.start() end
+end
+
+function metsearch.stateName()
+    if metsearch.state == "dig" then return ru("Копаю") end
+    if metsearch.state == "search" then return ru("Ищу точку") end
+    return ru("Обход зоны")
+end
+
+metsearch.feedbackUrl = "https://t.me/+oKIrpZ4DT-03ZTMy"
+
+function metsearch.openFeedback()
+    local ok, err = pcall(function()
+        if not metsearch.shell then
+            ffi.cdef[[ void* ShellExecuteA(void* hwnd, const char* op, const char* file, const char* params, const char* dir, int show); ]]
+            metsearch.shell = ffi.load("shell32")
+        end
+        metsearch.shell.ShellExecuteA(nil, "open", metsearch.feedbackUrl, nil, nil, 1)
+    end)
+    if not ok then
+        print("[Metal detector] Failed to open link: " .. tostring(err))
+        metsearch.chat(ru("Не удалось открыть ссылку: ") .. metsearch.feedbackUrl, true)
+    end
+end
+
+function metsearch.render(w)
+    Ui.group(nil, {
+        { kind = "custom", h = 92, draw = function(x, y, wd, h)
+            local dl = imgui.GetWindowDrawList()
+            dl:AddRectFilled(ImVec2(x, y), ImVec2(x + wd, y + h), u32(P.warning, 0.10), 12)
+            dl:AddRectFilled(ImVec2(x + 2, y + 14), ImVec2(x + 5, y + h - 14), u32(P.warning), 1)
+            text(dl, x + 18, y + 12, u32(P.warning), u8(ru("Модуль в тестировании")), Fonts.bold)
+            text(dl, x + 18, y + 38, u32(P.text), u8(ru("Металлоискатель проходит тестирование, возможны ошибки и сбои.")), Fonts.smallBold)
+            text(dl, x + 18, y + 60, u32(P.muted), u8(ru("Разработчик не несёт ответственности за последствия его использования.")), Fonts.smallBold)
+        end },
+        { kind = "button", id = "met_feedback", title = ru("Нашли баг или проблему?"),
+          desc = ru("Напишите разработчику в Telegram"),
+          label = ru("Написать"), variant = "accent", onClick = metsearch.openFeedback },
+    })
+
+    Ui.group(nil, {
+        { kind = "custom", h = 70, title = ru("Металлоискатель"),
+          desc = metsearch.enabled and metsearch.stateName() or ru("Выключен"), draw = function(x, y, wd, h)
+            imgui.SetCursorScreenPos(ImVec2(x + wd - 16 - 132, y + (h - 34) * 0.5))
+            if Ui.button("met_toggle", metsearch.enabled and ru("Остановить") or ru("Запустить"), 132, 34,
+                metsearch.enabled and "danger" or "accent") then
+                metsearch.toggle()
+            end
+        end },
+    })
+
+    Ui.group(ru("Зона поиска"), {
+        { title = ru("Углов отмечено"), desc = tostring(#metsearch.points) .. ru(" (нужно минимум 3)") },
+        { kind = "button", id = "met_addpoint", title = ru("Отметить угол"),
+          desc = ru("Встаньте в угол зоны и нажмите (/metp)"),
+          label = ru("Отметить"), variant = "accent", onClick = metsearch.addPoint },
+        { kind = "button", id = "met_clear", title = ru("Сбросить зону"),
+          desc = ru("Удалить все углы и остановить поиск (/metclear)"),
+          label = ru("Сбросить"), variant = "danger", onClick = metsearch.clear },
+    })
+
+    Ui.group(ru("Параметры"), {
+        { kind = "slider", id = "met_found", title = ru("Порог раскопки"),
+          desc = ru("С какого показания прибора начинать копать"),
+          ptr = S.metFound, mn = 70, mx = 110, fmt = "%d" },
+        { kind = "slider", id = "met_time", title = ru("Время поиска точки"),
+          desc = ru("Сколько секунд искать, прежде чем сдаться"),
+          ptr = S.metTime, mn = 20, mx = 180, fmt = ru("%d с") },
+        { kind = "sliderf", id = "met_hold", title = ru("Удержание сигнала"),
+          desc = ru("Сколько секунд держать показание между тиками"),
+          ptr = S.metHold, mn = 0.5, mx = 3.0, fmt = "%.1f", sw = 140 },
+    })
+
+    Ui.group(ru("Статистика"), {
+        { title = ru("Текущий сигнал"), desc = tostring(metsearch.enabled and metsearch.sig() or 0) },
+        { title = ru("Откопано"), desc = tostring(metsearch.dug) },
+        { title = ru("Как пользоваться"), desc = ru("Отметьте углы /metp, встаньте в зону, запустите /met") },
+    })
+end
+
 svalka.showPage = function()
     State.tab = TAB_SVALKA
     State.window[0] = true
@@ -2530,7 +3057,7 @@ local posItems = imgui.new["const char*"][#posNames](posNames)
 local function menuKeyCode() return keyCodes[S.menuKey[0] + 1] or 0x2D end
 
 local function runningModule()
-    if bot.on then return "fish" elseif truck.enabled then return "truck" elseif trainbot.enabled then return "train" elseif Ohota.enabled then return "hunt" elseif svalka.active[0] then return "svalka" elseif caseCatcher.enabled[0] then return "case" elseif shkola.enabled[0] then return "school" elseif ezsim.enabled then return "sim" end
+    if bot.on then return "fish" elseif truck.enabled then return "truck" elseif trainbot.enabled then return "train" elseif Ohota.enabled then return "hunt" elseif svalka.active[0] then return "svalka" elseif caseCatcher.enabled[0] then return "case" elseif shkola.enabled[0] then return "school" elseif ezsim.enabled then return "sim" elseif metsearch.enabled then return "met" end
     return nil
 end
 
@@ -2542,6 +3069,7 @@ local function currentModule()
     if State.tab == TAB_CASE then return "case" end
     if State.tab == TAB_SCHOOL then return "school" end
     if State.tab == TAB_SIM then return "sim" end
+    if State.tab == TAB_MET then return "met" end
     return "fish"
 end
 
@@ -2554,6 +3082,7 @@ local MODULE_NAMES = {
     case = ru("Кейсы"),
     school = ru("Школа"),
     sim = ru("SIM-карта"),
+    met = ru("Металлоискатель"),
 }
 
 local function resetSettings()
@@ -2579,6 +3108,7 @@ local function resetSettings()
     ffi.copy(S.telegramToken, tostring(DEFAULTS.TelegramToken))
     S.telegramDisconnect[0] = DEFAULTS.TelegramDisconnect
     S.telegramAdmin[0] = DEFAULTS.TelegramAdmin
+    S.metFound[0], S.metTime[0], S.metHold[0] = DEFAULTS.MetFound, DEFAULTS.MetSearchTime, DEFAULTS.MetHold
     update_accent()
     save_config()
     Notifications.push("info", ru("Настройки"), ru("Настройки сброшены"))
@@ -2598,11 +3128,11 @@ local function renderHome(w)
     Ui.moduleCard("m_truck", ru("Дальнобойщик"), ru("Автоматический выбор заказов"), 5, truck.enabled, truckStatus, w,
         toggleTrucking, function() State.tab = TAB_TRUCK end)
 
-    Ui.moduleCard("m_train", ru("Поезд"), ru("Автопилот машиниста"), 5, trainbot.enabled,
+    Ui.moduleCard("m_train", ru("Поезд"), ru("Автопилот машиниста"), 11, trainbot.enabled,
         trainbot.enabled and ru("Автопилот включён") or ru("Ожидает запуска"), w,
         toggleTrain, function() State.tab = TAB_TRAIN end)
 
-    Ui.moduleCard("m_hunt", ru("Охота"), ru("Метки, прицел и утилиты"), 4, Ohota.enabled,
+    Ui.moduleCard("m_hunt", ru("Охота"), ru("Метки, прицел и утилиты"), 10, Ohota.enabled,
         Ohota.enabled and ru("Охота включена") or ru("Готов к запуску"), w,
         toggleOhota, function() State.tab = TAB_OHOTA end)
 
@@ -2612,21 +3142,26 @@ local function renderHome(w)
     end
     local svalkaStatus = svalka.active[0] and ru("Метки включены")
         or (svalka.loaded and (ru("Предметов выбрано: ") .. enabledSvalkaItems) or ru("Список предметов не загружен"))
-    Ui.moduleCard("m_svalka", ru("Свалка"), ru("Метки предметов на свалке"), 3, svalka.active[0], svalkaStatus, w,
+    Ui.moduleCard("m_svalka", ru("Свалка"), ru("Метки предметов на свалке"), 12, svalka.active[0], svalkaStatus, w,
         svalka.toggle, svalka.showPage)
 
     local caseStatus = caseCatcher.enabled[0] and ru("Автопокупка включена") or ru("Ожидает запуска")
-    Ui.moduleCard("m_case", ru("Кейсы"), ru("Автопокупка кейсов по таймеру"), 5, caseCatcher.enabled[0], caseStatus, w,
+    Ui.moduleCard("m_case", ru("Кейсы"), ru("Автопокупка кейсов по таймеру"), 7, caseCatcher.enabled[0], caseStatus, w,
         function() caseCatcher.enabled[0] = not caseCatcher.enabled[0] end,
         function() State.tab = TAB_CASE end)
 
     local schoolStatus = shkola.enabled[0] and (ru("Нажатий: ") .. shkola.pressed) or ru("Ожидает запуска")
-    Ui.moduleCard("m_school", ru("Школа"), ru("Автонажатие клавиш в танцах"), 5, shkola.enabled[0], schoolStatus, w,
+    Ui.moduleCard("m_school", ru("Школа"), ru("Автонажатие клавиш в танцах"), 8, shkola.enabled[0], schoolStatus, w,
         shkola.toggle, function() State.tab = TAB_SCHOOL end)
 
     local simStatus = ezsim.enabled and (ru("Отправлено: ") .. ezsim.sent) or ru("Ожидает запуска")
-    Ui.moduleCard("m_sim", ru("SIM-карта"), ru("Перебор номеров телефона"), 5, ezsim.enabled, simStatus, w,
+    Ui.moduleCard("m_sim", ru("SIM-карта"), ru("Перебор номеров телефона"), 6, ezsim.enabled, simStatus, w,
         ezsim.toggle, function() State.tab = TAB_SIM end)
+
+    local metStatus = metsearch.enabled and (metsearch.stateName() .. "  |  " .. ru("Откопано: ") .. metsearch.dug)
+        or (#metsearch.points >= 3 and (ru("Углов зоны: ") .. #metsearch.points) or ru("Зона не задана"))
+    Ui.moduleCard("m_met", ru("Металлоискатель"), ru("Автопоиск и раскопка кладов"), 9, metsearch.enabled, metStatus, w,
+        metsearch.toggle, function() State.tab = TAB_MET end)
 
     -- ����� ��� ������� ������
     local pp = imgui.GetCursorScreenPos()
@@ -3136,6 +3671,7 @@ local function renderScript(w)
         { title = ru("Свалка"), desc = ru("/") .. svalka.settings.cmd .. ru(" — страница, /") .. svalka.settings.cmdact .. ru(" — включить или выключить метки") },
         { title = ru("Кейсы"), desc = ru("/case — открыть страницу автопокупки кейсов") },
         { title = ru("SIM-карта"), desc = ru("/ezsim — включить или выключить перебор номеров") },
+        { title = ru("Металлоискатель"), desc = ru("/met — старт/стоп, /metp — угол зоны, /metclear — сброс зоны") },
     })
 
     Ui.group(ru("Обновления"), {
@@ -3281,7 +3817,7 @@ local function renderSidebar(winPos)
         if (i == TAB_FISH and bot.on) or (i == TAB_TRUCK and truck.enabled)
             or (i == TAB_TRAIN and trainbot.enabled) or (i == TAB_OHOTA and Ohota.enabled)
             or (i == TAB_SVALKA and svalka.active[0]) or (i == TAB_CASE and caseCatcher.enabled[0]) or (i == TAB_SCHOOL and shkola.enabled[0])
-            or (i == TAB_SIM and ezsim.enabled) then
+            or (i == TAB_SIM and ezsim.enabled) or (i == TAB_MET and metsearch.enabled) then
             dl:AddCircleFilled(ImVec2(x2 - 14, y1 + rowH * 0.5), 3.5 + 0.8 * math_sin(now() * 4), u32(P.success), 12)
         end
     end
@@ -3310,13 +3846,16 @@ local function renderSidebar(winPos)
     end
     if shown == "school" then info = ru("Автотанцы") end
     if shown == "sim" then info = ru("Перебор номеров") end
+    if shown == "met" then info = ru("Поиск кладов") end
     if shown == "train" then info = ru("Автопилот машиниста") end
     if shown == "hunt" then info = "\204\238\228\243\235\252 \238\245\238\242\251" end
     if running then text(dl, bx + 14, by + 54, u32(P.dim), u8(info), Fonts.smallBold) end
 
     imgui.SetCursorScreenPos(ImVec2(bx + 12, by + 74))
     if Ui.button("toggle", running and ru("Остановить") or ru("Запустить"), SB_W - 44, 40, running and "danger" or "accent") then
-        if running == "sim" then ezsim.stop()
+        if running == "met" then metsearch.stop()
+        elseif cur == "met" and not running then metsearch.start()
+        elseif running == "sim" then ezsim.stop()
         elseif cur == "sim" and not running then ezsim.start()
         elseif running == "school" then shkola.enabled[0] = false
         elseif cur == "school" and not running then shkola.enabled[0] = true
@@ -3426,6 +3965,8 @@ local function renderMain()
         shkola.render(w)
     elseif State.tab == TAB_SIM then
         ezsim.render(w)
+    elseif State.tab == TAB_MET then
+        metsearch.render(w)
     else
         renderTrain(w)
     end
@@ -3531,6 +4072,10 @@ local function renderHud()
     elseif ezsim.enabled then
         text(dl, p.x + 32, p.y + 11, u32(P.text), u8(ru("SIM-карта")), Fonts.bold)
         text(dl, p.x + 104, p.y + 13, u32(P.muted), u8(ru("Отправлено: ") .. ezsim.sent), Fonts.smallBold)
+    elseif metsearch.enabled then
+        text(dl, p.x + 32, p.y + 11, u32(P.text), u8(ru("Металлопоиск")), Fonts.bold)
+        text(dl, p.x + 104, p.y + 13, u32(P.muted),
+            u8(ru("Сигнал: ") .. metsearch.sig() .. "  |  " .. ru("Клады: ") .. metsearch.dug), Fonts.smallBold)
     elseif svalka.active[0] then
         text(dl, p.x + 32, p.y + 11, u32(P.text), u8(ru("Свалка")), Fonts.bold)
         text(dl, p.x + 104, p.y + 13, u32(P.muted), u8(ru("Метки предметов включены")), Fonts.smallBold)
@@ -3561,7 +4106,7 @@ imgui.OnFrame(
 )
 
 imgui.OnFrame(
-    function() return S.hud[0] and (bot.on or truck.enabled or trainbot.enabled or Ohota.enabled or svalka.active[0] or ezsim.enabled) and not isPauseMenuActive() end,
+    function() return S.hud[0] and (bot.on or truck.enabled or trainbot.enabled or Ohota.enabled or svalka.active[0] or ezsim.enabled or metsearch.enabled) and not isPauseMenuActive() end,
     function(frame)
         frame.HideCursor = true
         renderHud()
@@ -3871,10 +4416,14 @@ function main()
     end)
     sampRegisterChatCommand("school", shkola.toggle)
     sampRegisterChatCommand("ezsim", ezsim.toggle)
+    sampRegisterChatCommand("met", metsearch.toggle)
+    sampRegisterChatCommand("metp", metsearch.addPoint)
+    sampRegisterChatCommand("metclear", metsearch.clear)
+    sampRegisterChatCommand("metdebug", metsearch.toggleDebug)
     if svalka.settings.cmd ~= "" then sampRegisterChatCommand(svalka.settings.cmd, svalka.showPage) end
     if svalka.settings.cmdact ~= "" then sampRegisterChatCommand(svalka.settings.cmdact, svalka.toggle) end
 
-    sampAddChatMessage("{FF3844}[SofterRadmira] {FFFFFF}" .. ru("Hub запущен 5.2.3 . Меню: ") .. keyNames[S.menuKey[0] + 1] .. ru(" или /sfradmira"), -1)
+    sampAddChatMessage("{FF3844}[SofterRadmira] {FFFFFF}" .. ru("Hub запущен 5.2.6 . Меню: ") .. keyNames[S.menuKey[0] + 1] .. ru(" или /sfradmira"), -1)
     if not svalka.loaded then
         sampAddChatMessage("{FF3844}[SofterRadmira] {FFFFFF}" .. (svalka.error or ru("Список Svalka недоступен")), -1)
     end
@@ -3952,6 +4501,7 @@ function onScriptTerminate(scr, quitGame)
         Ohota.enabled = false
         if shkola then shkola.enabled[0] = false end
         if ezsim then ezsim.enabled = false end
+        if metsearch then metsearch.enabled = false; metsearch.stopWalk() end
         if dirty then save_config() end
         if ohotaDirty then saveOhotaConfig() end
         if svalka.saveTime then svalka.saveConfig() end
