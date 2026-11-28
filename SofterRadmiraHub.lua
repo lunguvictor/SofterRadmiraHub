@@ -2279,6 +2279,12 @@ local function sendCasePacket()
     return ok and result ~= false
 end
 
+function caseCatcher.basketTotal()
+    local total = 0
+    for _, quantity in pairs(caseCatcher.quantities) do total = total + quantity[0] end
+    return total
+end
+
 function caseCatcher.update()
     if not caseCatcher.enabled[0] or not caseCatcher.timerDuration or not caseCatcher.timerStartedAt then return end
     local currentTime = getGameTimer() / 1000
@@ -2288,10 +2294,21 @@ function caseCatcher.update()
         for _, quantity in pairs(caseCatcher.quantities) do
             if quantity[0] > 0 then hasItems = true break end
         end
-        if hasItems and sendCasePacket() then
+        if not hasItems then
+            if not caseCatcher.warnedEmpty then
+                caseCatcher.warnedEmpty = true
+                Notifications.push("warning", ru("Кейсы"), ru("Таймер истёк, но корзина пуста: задайте количества"))
+            end
+        elseif sendCasePacket() then
             caseCatcher.lastBuy = currentTime
             caseCatcher.timerStartedAt = currentTime - caseCatcher.timerDuration
+            caseCatcher.sentCount = (caseCatcher.sentCount or 0) + 1
             Notifications.push("success", ru("Кейсы"), ru("Заказ кейсов отправлен"))
+            print("[Case] order sent")
+        elseif not caseCatcher.warnedSend then
+            caseCatcher.warnedSend = true
+            Notifications.push("danger", ru("Кейсы"), ru("Не удалось отправить заказ"))
+            print("[Case] sendCasePacket failed")
         end
     end
 end
@@ -2314,10 +2331,14 @@ function caseCatcher.onPacket(id, bs)
         end
         local text = table.concat(parts)
         if text:find("onServerResponse(22", 1, true) then
-            local seconds = text:match("onServerResponse%(22,%s*'%[%[%d+%],%s*%[%d+%],%s*(%d+),")
+            local seconds = text:match("onServerResponse%(22,%s*'%[%[[^%]]*%],%s*%[[^%]]*%],%s*(%d+),")
             if seconds then
                 caseCatcher.timerDuration = tonumber(seconds)
                 caseCatcher.timerStartedAt = getGameTimer() / 1000
+                caseCatcher.warnedEmpty, caseCatcher.warnedSend = false, false
+                print("[Case] timer received: " .. seconds .. " s")
+            else
+                print("[Case] onServerResponse(22 found, timer format not recognized: " .. text:sub(1, 160))
             end
         end
     end
@@ -3389,6 +3410,9 @@ local function renderCase(w)
         { kind = "switch", id = "case_enabled", title = ru("Автопокупка"),
           desc = ru("Отправлять корзину при истечении таймера"), ptr = caseCatcher.enabled },
         { title = ru("До следующей покупки"), desc = remainingText },
+        { title = ru("Состояние"), desc = caseCatcher.timerDuration
+            and (ru("Таймер получен, в корзине: ") .. caseCatcher.basketTotal() .. ru(" шт., отправлено заказов: ") .. (caseCatcher.sentCount or 0))
+            or ru("Таймер не получен: откройте окно кейсов в игре") },
     })
 
     Ui.group(ru("Количества"), {
